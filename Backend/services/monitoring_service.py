@@ -12,6 +12,22 @@ from backend.core.logger import get_logger
 logger = get_logger("monitoring_service")
 
 
+def _convert_neo4j_datetimes(obj: Any) -> Any:
+    """Recursively convert neo4j.time.DateTime objects to ISO strings."""
+    try:
+        from neo4j.time import DateTime as Neo4jDateTime
+    except ImportError:
+        return obj
+
+    if isinstance(obj, dict):
+        return {k: _convert_neo4j_datetimes(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_neo4j_datetimes(item) for item in obj]
+    elif isinstance(obj, Neo4jDateTime):
+        return obj.isoformat()
+    return obj
+
+
 class MonitoringService:
     """Service for digital twin state and network monitoring."""
 
@@ -79,7 +95,7 @@ class MonitoringService:
         } AS network_state
         """
         result = await neo4j_manager.execute_read(query)
-        return result[0]["network_state"] if result else {}
+        return _convert_neo4j_datetimes(result[0]["network_state"]) if result else {}
 
     async def get_train_positions(self) -> list[dict[str, Any]]:
         """Get current positions of all trains."""
@@ -96,7 +112,7 @@ class MonitoringService:
         t.progress_on_track AS progress
         """
         result = await neo4j_manager.execute_read(query)
-        return [
+        return _convert_neo4j_datetimes([
             {
                 "train_number": r["train"]["train_number"],
                 "name": r["train"]["name"],
@@ -109,15 +125,15 @@ class MonitoringService:
                 "last_updated": r["train"]["last_updated"],
             }
             for r in result
-        ]
+        ])
 
     async def get_system_metrics(self) -> dict[str, Any]:
         """Get aggregated system metrics from the digital twin."""
         metrics = await self._monitoring_agent.get_live_metrics()
-        return {
+        return _convert_neo4j_datetimes({
             "digital_twin_metrics": metrics,
             "event_bus_metrics": self._monitoring_agent.event_manager.get_metrics(),
-        }
+        })
 
     async def get_recent_events(
         self,
@@ -149,8 +165,8 @@ class MonitoringService:
             params = {"limit": limit}
 
         result = await neo4j_manager.execute_read(query, params)
-        return [r["event"] for r in result]
+        return _convert_neo4j_datetimes([r["event"] for r in result])
 
     def get_digital_twin_snapshot(self) -> dict[str, Any]:
         """Get a snapshot of the monitoring agent's digital twin state."""
-        return self._monitoring_agent.get_digital_twin_state()
+        return _convert_neo4j_datetimes(self._monitoring_agent.get_digital_twin_state())

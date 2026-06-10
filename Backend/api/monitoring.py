@@ -6,6 +6,7 @@ Digital twin state, network metrics, and live event streaming.
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 
 from backend.services.monitoring_service import MonitoringService
 from backend.agents.monitoring_agent import NetworkMonitoringAgent
@@ -16,7 +17,6 @@ router = APIRouter(prefix="/network-state", tags=["Monitoring"])
 
 
 def get_monitoring_agent() -> NetworkMonitoringAgent:
-    # In production, this would be retrieved from a shared registry
     from backend.main import monitoring_agent
     return monitoring_agent
 
@@ -27,61 +27,64 @@ def get_monitoring_service(
     return MonitoringService(agent)
 
 
-@router.get("", response_model=dict[str, Any])
+@router.get("")
 async def get_network_state(
     service: MonitoringService = Depends(get_monitoring_service),
-) -> dict[str, Any]:
+) -> JSONResponse:
     """Retrieve the complete current network state from the graph."""
-    return await service.get_network_state()
+    data = await service.get_network_state()
+    return JSONResponse(content=data)
 
 
-@router.get("/trains", response_model=dict[str, Any])
+@router.get("/trains")
 async def get_train_positions(
     service: MonitoringService = Depends(get_monitoring_service),
-) -> dict[str, Any]:
+) -> JSONResponse:
     """Get current positions of all trains."""
     positions = await service.get_train_positions()
-    return {
+    return JSONResponse(content={
         "trains": positions,
         "count": len(positions),
         "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
-    }
+    })
 
 
-@router.get("/metrics", response_model=dict[str, Any])
+@router.get("/metrics")
 async def get_system_metrics(
     service: MonitoringService = Depends(get_monitoring_service),
-) -> dict[str, Any]:
+) -> JSONResponse:
     """Get aggregated system metrics from the digital twin."""
-    return await service.get_system_metrics()
+    data = await service.get_system_metrics()
+    return JSONResponse(content=data)
 
 
-@router.get("/digital-twin", response_model=dict[str, Any])
+@router.get("/digital-twin")
 async def get_digital_twin(
     service: MonitoringService = Depends(get_monitoring_service),
-) -> dict[str, Any]:
+) -> JSONResponse:
     """Get a snapshot of the digital twin state."""
-    return service.get_digital_twin_snapshot()
+    data = service.get_digital_twin_snapshot()
+    return JSONResponse(content=data)
 
 
-@router.get("/events", response_model=dict[str, Any])
+@router.get("/events")
 async def get_recent_events(
     limit: int = 50,
     event_type: str | None = None,
     service: MonitoringService = Depends(get_monitoring_service),
-) -> dict[str, Any]:
+) -> JSONResponse:
     """Get recent system events."""
     events = await service.get_recent_events(limit=limit, event_type=event_type)
-    return {
+    return JSONResponse(content={
         "events": events,
         "count": len(events),
         "limit": limit,
         "event_type": event_type,
-    }
+    })
 
 
-@router.get("/events/stats", response_model=dict[str, Any])
-async def get_event_stats() -> dict[str, Any]:
+@router.get("/events/stats")
+async def get_event_stats() -> JSONResponse:
     """Get event statistics from the graph."""
     query = """
     CALL {
@@ -116,10 +119,10 @@ async def get_event_stats() -> dict[str, Any]:
     from backend.graph.neo4j_client import neo4j_manager
     result = await neo4j_manager.execute_read(query)
     stats = result[0]["stats"] if result else {}
-    return {
+    return JSONResponse(content={
         "total_events": stats.get("total_events", 0),
         "by_type": stats.get("by_type", {}),
         "by_severity": stats.get("by_severity", {}),
         "unresolved_count": stats.get("unresolved_count", 0),
         "average_delay_minutes": round(stats.get("average_delay_minutes", 0), 2),
-    }
+    })
