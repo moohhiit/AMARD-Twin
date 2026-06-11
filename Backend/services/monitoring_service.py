@@ -13,18 +13,15 @@ logger = get_logger("monitoring_service")
 
 
 def _convert_neo4j_datetimes(obj: Any) -> Any:
-    """Recursively convert neo4j.time.DateTime objects to ISO strings."""
-    try:
-        from neo4j.time import DateTime as Neo4jDateTime
-    except ImportError:
-        return obj
-
+    """Recursively convert neo4j.time.* objects to ISO strings."""
     if isinstance(obj, dict):
         return {k: _convert_neo4j_datetimes(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [_convert_neo4j_datetimes(item) for item in obj]
-    elif isinstance(obj, Neo4jDateTime):
-        return obj.isoformat()
+    elif hasattr(obj, "__class__") and obj.__class__.__module__ == "neo4j.time":
+        if hasattr(obj, "isoformat"):
+            return obj.isoformat()
+        return str(obj)
     return obj
 
 
@@ -40,7 +37,17 @@ class MonitoringService:
         CALL {
             MATCH (t:Train)
             RETURN collect(t {
-                .*,
+                train_number: t.train_number,
+                name: t.name,
+                status: t.status,
+                speed: t.speed,
+                direction: t.direction,
+                current_track: t.current_track,
+                next_track: t.next_track,
+                route_id: t.route_id,
+                progress_on_track: t.progress_on_track,
+                train_length_m: t.train_length_m,
+                current_platform: t.current_platform,
                 last_updated: toString(t.last_updated)
             }) AS trains
         }
@@ -49,7 +56,11 @@ class MonitoringService:
             OPTIONAL MATCH (tr)-[:PART_OF]->(z:Zone)
             OPTIONAL MATCH (tr)<-[:CURRENTLY_ON]-(t:Train)
             RETURN collect(tr {
-                .*,
+                track_id: tr.track_id,
+                length_km: tr.length_km,
+                speed_limit: tr.speed_limit,
+                status: tr.status,
+                risk_level: tr.risk_level,
                 zone_id: z.zone_id,
                 occupied_by: t.train_number
             }) AS tracks
@@ -58,7 +69,9 @@ class MonitoringService:
             MATCH (sig:Signal)
             OPTIONAL MATCH (sig)-[:PROTECTED_BY]->(tr:TrackSegment)
             RETURN collect(sig {
-                .*,
+                signal_id: sig.signal_id,
+                state: sig.state,
+                controlled_track: sig.controlled_track,
                 protected_track: tr.track_id,
                 last_changed: toString(sig.last_changed)
             }) AS signals
@@ -68,7 +81,11 @@ class MonitoringService:
             OPTIONAL MATCH (p)<-[:HAS_PLATFORM]-(s:Station)
             OPTIONAL MATCH (p)<-[:AT_PLATFORM]-(t:Train)
             RETURN collect(p {
-                .*,
+                platform_id: p.platform_id,
+                platform_number: p.platform_number,
+                name: p.name,
+                status: p.status,
+                length_m: p.length_m,
                 station_id: s.station_id,
                 station_name: s.name,
                 occupied_by: t.train_number
@@ -76,13 +93,25 @@ class MonitoringService:
         }
         CALL {
             MATCH (z:Zone)
-            RETURN collect(z) AS zones
+            RETURN collect(z {
+                zone_id: z.zone_id,
+                name: z.name,
+                occupancy_level: z.occupancy_level,
+                congestion_level: z.congestion_level,
+                risk_score: z.risk_score
+            }) AS zones
         }
         CALL {
             MATCH (e:Event)
             RETURN collect(e {
-                .*,
-                timestamp: toString(e.timestamp)
+                event_id: e.event_id,
+                event_type: e.event_type,
+                severity: e.severity,
+                timestamp: toString(e.timestamp),
+                resolved: e.resolved,
+                source_train: e.source_train,
+                delay_minutes: e.delay_minutes,
+                location: e.location
             }) AS events
         }
         RETURN {
@@ -95,7 +124,8 @@ class MonitoringService:
         } AS network_state
         """
         result = await neo4j_manager.execute_read(query)
-        return _convert_neo4j_datetimes(result[0]["network_state"]) if result else {}
+        raw = result[0]["network_state"] if result else {}
+        return _convert_neo4j_datetimes(raw)
 
     async def get_train_positions(self) -> list[dict[str, Any]]:
         """Get current positions of all trains."""
@@ -104,7 +134,17 @@ class MonitoringService:
         OPTIONAL MATCH (t)-[:CURRENTLY_ON]->(tr:TrackSegment)
         OPTIONAL MATCH (t)-[:IN_ZONE]->(z:Zone)
         RETURN t {
-            .*,
+            train_number: t.train_number,
+            name: t.name,
+            status: t.status,
+            speed: t.speed,
+            direction: t.direction,
+            current_track: t.current_track,
+            next_track: t.next_track,
+            route_id: t.route_id,
+            progress_on_track: t.progress_on_track,
+            train_length_m: t.train_length_m,
+            current_platform: t.current_platform,
             last_updated: toString(t.last_updated)
         } AS train,
         tr.track_id AS track_id,
@@ -145,8 +185,14 @@ class MonitoringService:
             query = """
             MATCH (e:Event {event_type: $event_type})
             RETURN e {
-                .*,
-                timestamp: toString(e.timestamp)
+                event_id: e.event_id,
+                event_type: e.event_type,
+                severity: e.severity,
+                timestamp: toString(e.timestamp),
+                resolved: e.resolved,
+                source_train: e.source_train,
+                delay_minutes: e.delay_minutes,
+                location: e.location
             } AS event
             ORDER BY e.timestamp DESC
             LIMIT $limit
@@ -156,8 +202,14 @@ class MonitoringService:
             query = """
             MATCH (e:Event)
             RETURN e {
-                .*,
-                timestamp: toString(e.timestamp)
+                event_id: e.event_id,
+                event_type: e.event_type,
+                severity: e.severity,
+                timestamp: toString(e.timestamp),
+                resolved: e.resolved,
+                source_train: e.source_train,
+                delay_minutes: e.delay_minutes,
+                location: e.location
             } AS event
             ORDER BY e.timestamp DESC
             LIMIT $limit
