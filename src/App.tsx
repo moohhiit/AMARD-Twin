@@ -495,6 +495,9 @@ export default function App() {
             agentDecisions={agentDecisions}
             alerts={alerts}
             onClearAlerts={() => setAlerts([])}
+            selectedTrain={selectedTrain ? trains[selectedTrain] : null}
+            stationNames={Object.fromEntries(Object.entries(STATIONS).map(([k, v]) => [k, v.name]))}
+            simTime={simTime}
           />
         </div>
       </div>

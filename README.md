@@ -4,6 +4,60 @@ A production-grade intelligent railway control backend and real-time dashboard b
 
 ---
 
+## Implementation Progress
+
+> Last updated: 2026-06-12 | Status: Implementation In Progress
+
+### ✅ Backend — Already Implemented
+- [x] Real-Time Railway Clock (backend `scheduleManager.ts` — `simTime` computed & emitted)
+  - `currentSimMinute()` calculates sim time; `system:status` emits `sim_time`; `setSimStartTime()` allows clock jump
+- [x] Train Schedule Database (20 trains, full HH:MM schedule in `seedMongo.ts`)
+  - All trains have `ScheduleStop[]` with `scheduled_arrival`, `scheduled_departure`, `halt_minutes`, `platform_preference`
+- [x] Actual Arrival/Departure Tracking (`scheduleManager.ts` — `recordArrival` / `recordDeparture`)
+  - `actual_arrival`, `actual_departure`, `delay_minutes` tracked; `schedule:arrival` / `schedule:departure` events emitted
+- [x] Automatic Delay Calculation (`computeScheduledDelay` — negative = early, positive = delayed)
+  - Early arrival scenario built into T-102; delayed scenario pre-baked in T-117
+- [x] Double Track System (A/B segment pairs — e.g., `DEL-JNW-A` up, `DEL-JNW-B` down)
+  - 52 total segments (26 bidirectional pairs) covering all 6 corridors
+- [x] Track Occupancy Management (`trackManager.ts` — per-segment Set of train IDs)
+  - Congestion severity: LOW 50% / MEDIUM 70% / HIGH 90% / CRITICAL 100%
+- [x] Conflict Detection (`collisionSystem.ts` — safe distance 2.5km, warning at 5km)
+  - Emergency brake applied automatically; `collision:warning` event emitted
+- [x] Live Train Position Tracking (`movementEngine.ts` — physics-based, 100ms tick)
+  - ACCEL 15 km/h/s, DECEL 22 km/h/s, EMERGENCY 40 km/h/s
+- [x] Historical Delay Records stored in MongoDB (`TrainEvent` collection)
+  - `ARRIVAL`, `DEPARTURE`, `REROUTE`, `PLATFORM_ASSIGNED` events logged with timestamps
+- [x] Signal System (GREEN/YELLOW/RED per segment — `signalSystem.ts`)
+- [x] Weather Engine (CLEAR/RAIN/FOG/STORM with speed multipliers — `weatherEngine.ts`)
+- [x] Loop Line / Bypass System (`loopManager.ts` — priority-based diversion)
+- [x] AI Rerouting Agent (Neo4j Dijkstra pathfinding — `reroutingAgent.ts`)
+- [x] AI Platform Allocation Agent (multi-factor scoring — `platformAgent.ts`)
+
+### ✅ Frontend UI — All Features Complete
+- [x] Real-Time Railway Clock visible in Header (simTime + simSpeed passed to Header; dual clock — Railway Time in cyan + Local Time; blinking tick dot; speed badge)
+  - Dual clock: Railway simulation time (cyan, 16px, blinking tick) + Local wall time; speed badge amber/pink when ≠ 1×
+- [x] Station Timeline View — new `StationTimeline.tsx` + Timeline tab in `BottomMetricsStrip`
+  - Per-stop rows: scheduled/actual arrival+departure, delay badges (+Xm LATE / EARLY / ✓ On Time), halt duration, NEXT marker, completion checkmarks; stats header
+- [x] Delay Indicators / On-Time Badges — `LeftControlPanel.tsx` fully rebuilt
+  - `DelayBadge`: ON TIME / +Xm / +Xm LATE / Xm EARLY colour-coded; `StatusBadge`: RUNNING/DELAYED/REROUTING/BRAKING/WAITING/STOPPED; per-train mini progress bar + TrendingUp/Down icons
+- [x] Double Track Visual on Network Map — `NetworkMap.tsx` rewritten with parallel offset A/B lines
+  - A-track (up) and B-track (down) rendered as parallel lines with ±2.5px perpendicular offset; Track Legend added; occupancy dot at midpoint
+- [x] Route Progress Percentage — animated progress bar in `LeftControlPanel` TrainDetailCard + SVG hover card
+  - Colour-matched progress bar, `XX%` label; transitions smoothly on every update
+- [x] ETA to Next Station — computed and displayed in TrainDetailCard
+  - `ETA = (distance_to_next_km / current_speed_kmh) × 60`; shows "< 1 min" threshold
+- [x] Historical Delay Records Panel — Timeline tab in `BottomMetricsStrip` (auto-activates on train select)
+  - Full schedule with actual times; auto-switches to Timeline tab when a train is selected on map/list
+- [x] Track Occupancy Visual Indicators — coloured dot at segment midpoint on NetworkMap
+  - Green dot = trains present, amber dot = congestion > 70%
+- [x] Status Badges (ON-TIME / DELAYED / EARLY) — consistent across train list, detail card, and map hover card
+  - All three surfaces show ✓ On Time / ⚠ Delayed +Xm / ✓ Early Xm with matching colours
+
+### Known Issues
+> None currently identified. All planned features implemented and TypeScript type-check passes with 0 errors.
+
+---
+
 ## Table of Contents
 
 - [Project Overview](#project-overview)
