@@ -447,7 +447,7 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: "#0B0F19" }}>
-      <Header connected={connected} simTime={simTime} />
+      <Header connected={connected} simTime={simTime} simSpeed={simSpeed} />
       <div className="flex flex-1 overflow-hidden">
         {/* PATCH 3: simStartTime + onStartTimeChange passed to LeftControlPanel */}
         <LeftControlPanel
