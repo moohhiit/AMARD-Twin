@@ -10,6 +10,9 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: process.env.PORT ? parseInt(process.env.PORT) : 5173,
+    allowedHosts: [
+      "amard-twin-1.onrender.com"
+    ],
     proxy: {
       "/api": { target: BACKEND, changeOrigin: true },
       "/health": { target: BACKEND, changeOrigin: true },
