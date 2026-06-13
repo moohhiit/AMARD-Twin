@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
 // Backend runs on port 3000 — proxy all API + socket calls there
-const BACKEND = "http://localhost:3000";
+const BACKEND = "hhttps://amard-twin.onrender.com";
 
 export default defineConfig({
   base: './',

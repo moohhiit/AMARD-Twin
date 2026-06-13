@@ -25,11 +25,7 @@ interface StationTimelineProps {
   simTime:      string;
 }
 
-function parseMinutes(hhmm: string): number {
-  if (!hhmm || !hhmm.includes(":")) return 0;
-  const [h, m] = hhmm.split(":").map(Number);
-  return (h ?? 0) * 60 + (m ?? 0);
-}
+
 
 function delayColor(min: number): string {
   if (min > 5)  return "#EF4444";
@@ -41,7 +37,7 @@ function delayColor(min: number): string {
 // Determine if a stop is "current" — train is between this stop and the next one
 // Logic: current stop = the next unvisited stop in the schedule that matches next_station,
 // OR if no actual_arrival yet and scheduled time is near/past simTime
-function findCurrentStopIndex(schedule: ScheduleStop[], train: TrainState, simMinutes: number): number {
+function findCurrentStopIndex(schedule: ScheduleStop[], train: TrainState): number {
   // First: try matching next_station directly to a stop
   const byNextStation = schedule.findIndex(s => s.station_id === train.next_station);
   if (byNextStation >= 0) return byNextStation;
@@ -53,7 +49,7 @@ function findCurrentStopIndex(schedule: ScheduleStop[], train: TrainState, simMi
   return -1;
 }
 
-export default function StationTimeline({ train, stationNames, simTime }: StationTimelineProps) {
+export default function StationTimeline({ train, stationNames }: StationTimelineProps) {
   if (!train) {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 8 }}>
@@ -66,7 +62,6 @@ export default function StationTimeline({ train, stationNames, simTime }: Statio
   }
 
   const schedule: ScheduleStop[] = (train.schedule ?? []) as ScheduleStop[];
-  const simMinutes = parseMinutes(simTime);
 
   if (schedule.length === 0) {
     return (
@@ -77,7 +72,7 @@ export default function StationTimeline({ train, stationNames, simTime }: Statio
     );
   }
 
-  const currentIdx   = findCurrentStopIndex(schedule, train, simMinutes);
+  const currentIdx   = findCurrentStopIndex(schedule, train);
   const completedCount = schedule.filter(s => !!s.actual_arrival).length;
   // Stops considered done = stops before currentIdx (already passed)
   const pastCount    = currentIdx >= 0 ? currentIdx : completedCount;
@@ -140,7 +135,6 @@ export default function StationTimeline({ train, stationNames, simTime }: Statio
               const leftPct = totalStops > 1 ? (i / (totalStops - 1)) * 100 : 50;
               const isPast    = i < currentIdx;
               const isCurrent = i === currentIdx;
-              const isFuture  = i > currentIdx;
 
               return (
                 <div key={stop.station_id + i} style={{

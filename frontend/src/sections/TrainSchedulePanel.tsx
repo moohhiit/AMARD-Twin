@@ -10,7 +10,7 @@
  *  - Train summary header (type, speed, delay, next stop)
  */
 
-import { Train, MapPin, Clock, TrendingUp, TrendingDown, CheckCircle2, Circle, ChevronRight } from "lucide-react";
+import { Train, MapPin,  TrendingUp, TrendingDown, CheckCircle2, Circle, ChevronRight } from "lucide-react";
 import type { TrainState } from "../App";
 
 interface ScheduleStop {
@@ -32,11 +32,7 @@ interface TrainSchedulePanelProps {
   simTime:       string;
 }
 
-function parseMin(hhmm: string): number {
-  if (!hhmm || !hhmm.includes(":")) return 0;
-  const [h, m] = hhmm.split(":").map(Number);
-  return (h ?? 0) * 60 + (m ?? 0);
-}
+
 
 function delayColor(min: number) {
   if (min > 5)  return "#EF4444";
@@ -119,13 +115,12 @@ function TrainSelector({ trains, selectedTrain, onSelectTrain }: {
 }
 
 // ── Full Schedule View ────────────────────────────────────────────────────────
-function ScheduleView({ train, stationNames, simTime }: {
+function ScheduleView({ train, stationNames }: {
   train: TrainState;
   stationNames: Record<string, string>;
   simTime: string;
 }) {
   const schedule = (train.schedule ?? []) as ScheduleStop[];
-  const simMin   = parseMin(simTime);
 
   if (schedule.length === 0) {
     return (

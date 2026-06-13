@@ -4,6 +4,8 @@ import {
   TrendingUp, TrendingDown, Minus, MapPin, Timer,
 } from "lucide-react";
 import type { TrainState } from "../App";
+type LayerMode = "weather" | "full" | "congestion" | "agent" | "signal";
+
 
 interface LeftControlPanelProps {
   collapsed:              boolean;
@@ -30,7 +32,7 @@ interface LeftControlPanelProps {
   showAgentDecisions:     boolean;
   onToggleAgentDecisions: () => void;
   layerMode?:             string;
-  onLayerModeChange?:     (m: string) => void;
+  onLayerModeChange?: (m: LayerMode) => void;
 }
 
 const SPEED_PRESETS = [0.5, 1, 5, 10, 20, 50] as const;

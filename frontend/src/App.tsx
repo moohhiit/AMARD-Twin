@@ -290,7 +290,7 @@ export default function App() {
   const [activeTrains, setActiveTrains]     = useState(0);
   const [congestedTracks, setCongestedTracks] = useState(0);
   const [avgDelay, setAvgDelay]     = useState(0);
-  const dashboardTimer = useRef<NodeJS.Timeout | null>(null);
+  const dashboardTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── SOCKET CONNECTION ────────────────────────────────────────────────────
   useEffect(() => {
