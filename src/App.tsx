@@ -4,6 +4,7 @@ import Header from "./sections/Header";
 import LeftControlPanel from "./sections/LeftControlPanel";
 import NetworkMap from "./sections/NetworkMap";
 import BottomMetricsStrip from "./sections/BottomMetricsStrip";
+import TrainSchedulePanel from "./sections/TrainSchedulePanel";
 
 // ─── NETWORK CONSTANTS (unchanged from previous update) ──────────────────────
 const STATIONS: Record<string, { name: string; lat: number; lng: number; platforms: number }> = {
@@ -178,10 +179,10 @@ export default function App() {
   const [showTrackLabels, setShowTrackLabels]   = useState(false);
   const [showTrainNames, setShowTrainNames]     = useState(true);
   const [showAgentDecisions, setShowAgentDecisions] = useState(true);
+  const [showSchedulePanel, setShowSchedulePanel]   = useState(true);
   const [simSpeed, setSimSpeed]     = useState(1);
   const [isPaused, setIsPaused]     = useState(false);
   const [simTime, setSimTime]       = useState("06:00");
-  // PATCH 1: simStartTime state
   const [simStartTime, setSimStartTime] = useState("06:00");
   const [telemetry, setTelemetry]   = useState<string[]>([]);
   const [agentDecisions, setAgentDecisions] = useState<AgentDecision[]>([]);
@@ -324,16 +325,42 @@ export default function App() {
       if (data.sim_time) setSimTime(data.sim_time);
     });
 
+    // ── FIX: these two listeners were accidentally outside the useEffect ──
     socket.on("schedule:arrival", (data) => {
       setTelemetry(prev => [...prev,
         `[SCHED] Train ${data.train_id} arrived ${data.station_id} — sched: ${data.scheduled} actual: ${data.actual} delay: ${data.delay_min?.toFixed(1)}m`
       ].slice(-60));
+      setTrains(prev => {
+        const train = prev[data.train_id];
+        if (!train?.schedule) return prev;
+        const updatedSchedule = train.schedule.map((stop: any) =>
+          stop.station_id === data.station_id
+            ? { ...stop, actual_arrival: data.actual, delay_minutes: data.delay_min ?? 0 }
+            : stop
+        );
+        return { ...prev, [data.train_id]: { ...train, schedule: updatedSchedule } };
+      });
+    });
+
+    socket.on("schedule:departure", (data) => {
+      setTrains(prev => {
+        const train = prev[data.train_id];
+        if (!train?.schedule) return prev;
+        const updatedSchedule = train.schedule.map((stop: any) =>
+          stop.station_id === data.station_id
+            ? { ...stop, actual_departure: data.actual, delay_minutes: data.delay_min ?? 0 }
+            : stop
+        );
+        return { ...prev, [data.train_id]: { ...train, schedule: updatedSchedule } };
+      });
     });
 
     return () => {
-      ["train:update","train:rerouted","platform:assigned","platform:status",
-       "congestion:alert","track:blocked","weather:update","signal:change",
-       "collision:warning","agent:decision","system:status","schedule:arrival"
+      [
+        "train:update", "train:rerouted", "platform:assigned", "platform:status",
+        "congestion:alert", "track:blocked", "weather:update", "signal:change",
+        "collision:warning", "agent:decision", "system:status",
+        "schedule:arrival", "schedule:departure",
       ].forEach(ev => socket.off(ev));
     };
   }, [socket]);
@@ -418,9 +445,7 @@ export default function App() {
     if (action === "resume") { socket.emit("client:control:resume"); setIsPaused(false); }
   }, [socket]);
 
-  // PATCH 4: handleSpeedChange — accepts full 0.1–50 range, backend validates
   const handleSpeedChange = useCallback((speed: number) => {
-    // Accept full range 0.1–50; backend validates
     const clamped = Math.max(0.1, Math.min(50, speed));
     setSimSpeed(clamped);
     fetch("http://localhost:3000/api/v1/simulation/speed", {
@@ -430,7 +455,6 @@ export default function App() {
     }).catch(() => {});
   }, []);
 
-  // PATCH 2: handleStartTimeChange handler
   const handleStartTimeChange = useCallback((time: string) => {
     setSimStartTime(time);
     fetch("http://localhost:3000/api/v1/simulation/timeframe", {
@@ -438,7 +462,6 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ start_time: time }),
     }).catch(() => {});
-    // Optimistically update displayed sim time
     setSimTime(time);
   }, []);
 
@@ -449,7 +472,6 @@ export default function App() {
     <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: "#0B0F19" }}>
       <Header connected={connected} simTime={simTime} simSpeed={simSpeed} />
       <div className="flex flex-1 overflow-hidden">
-        {/* PATCH 3: simStartTime + onStartTimeChange passed to LeftControlPanel */}
         <LeftControlPanel
           collapsed={panelCollapsed}
           onToggleCollapse={() => setPanelCollapsed(!panelCollapsed)}
@@ -500,6 +522,56 @@ export default function App() {
             simTime={simTime}
           />
         </div>
+
+        {/* ── TRAIN SCHEDULE PANEL (right sidebar) ── */}
+        {showSchedulePanel && (
+          <div style={{
+            width: 420, borderLeft: "1px solid #1E2A45",
+            backgroundColor: "#0D1421", display: "flex", flexDirection: "column",
+            overflow: "hidden", flexShrink: 0,
+          }}>
+            {/* Panel header */}
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "0 14px", height: 40, borderBottom: "1px solid #1E2A45",
+              backgroundColor: "#0B0F19", flexShrink: 0,
+            }}>
+              <span style={{ color: "#E5E7EB", fontSize: 12, fontWeight: 600, fontFamily: "Inter, sans-serif" }}>
+                🚉 Train Schedule
+              </span>
+              <button
+                onClick={() => setShowSchedulePanel(false)}
+                style={{ color: "#6B7280", fontSize: 16, background: "none", border: "none",
+                  cursor: "pointer", lineHeight: 1, padding: "2px 4px" }}
+                title="Close schedule panel"
+              >×</button>
+            </div>
+            <div style={{ flex: 1, overflow: "hidden" }}>
+              <TrainSchedulePanel
+                trains={Object.values(trains)}
+                selectedTrain={selectedTrain}
+                onSelectTrain={setSelectedTrain}
+                stationNames={Object.fromEntries(Object.entries(STATIONS).map(([k, v]) => [k, v.name]))}
+                simTime={simTime}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Button to re-open panel when closed */}
+        {!showSchedulePanel && (
+          <button
+            onClick={() => setShowSchedulePanel(true)}
+            style={{
+              position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)",
+              backgroundColor: "#0D1421", border: "1px solid #1E2A45",
+              borderRight: "none", borderRadius: "6px 0 0 6px",
+              color: "#6B7280", fontSize: 10, padding: "12px 6px",
+              cursor: "pointer", writingMode: "vertical-rl", letterSpacing: "0.5px",
+              fontFamily: "Inter, sans-serif",
+            }}
+          >🚉 Schedule</button>
+        )}
       </div>
     </div>
   );

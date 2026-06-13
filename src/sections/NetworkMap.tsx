@@ -20,27 +20,59 @@ interface NetworkMapProps {
   showTrainNames: boolean;
 }
 
-// Group A/B track pairs so we can draw offset parallel lines
+// Group A/B pairs so we can draw offset parallel lines
 function groupTrackPairs(tracks: TrackDef[]) {
-  // Returns map: baseKey -> { a: TrackDef | null, b: TrackDef | null }
   const pairs: Record<string, { a: TrackDef | null; b: TrackDef | null }> = {};
   for (const t of tracks) {
     const base = t.segment_id.replace(/-[AB]$/, "");
     if (!pairs[base]) pairs[base] = { a: null, b: null };
     if (t.segment_id.endsWith("-A")) pairs[base].a = t;
     else if (t.segment_id.endsWith("-B")) pairs[base].b = t;
-    else pairs[base].a = t; // non-paired fallback
+    else pairs[base].a = t;
   }
   return pairs;
 }
 
-function getOffsetPoints(x1: number, y1: number, x2: number, y2: number, offset: number) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
+// Perpendicular offset vector for parallel tracks
+function getOffset(x1: number, y1: number, x2: number, y2: number, d: number) {
+  const dx = x2 - x1, dy = y2 - y1;
   const len = Math.sqrt(dx * dx + dy * dy) || 1;
-  const nx = (-dy / len) * offset;
-  const ny = (dx / len) * offset;
-  return { nx, ny };
+  return { nx: (-dy / len) * d, ny: (dx / len) * d };
+}
+
+// ── TRACK COLOR LOGIC ─────────────────────────────────────────────────────────
+// Priority: BLOCKED > CONGESTED > STORM > FOG > RAIN > OPEN
+function getTrackColor(t: TrackDef): string {
+  if (t.status === "BLOCKED")   return "#EF4444";
+  if (t.status === "CONGESTED") return "#F59E0B";
+  if (t.weather === "STORM")    return "#C084FC";   // purple
+  if (t.weather === "FOG")      return "#94A3B8";   // slate/grey
+  if (t.weather === "RAIN")     return "#60A5FA";   // blue
+  return "#1E2A45";
+}
+
+function getTrackGlow(t: TrackDef): string | undefined {
+  if (t.status === "BLOCKED")   return "url(#glowRed)";
+  if (t.status === "CONGESTED") return "url(#glowAmber)";
+  if (t.weather === "STORM")    return "url(#glowPurple)";
+  if (t.weather === "FOG")      return undefined;
+  if (t.weather === "RAIN")     return "url(#glowBlue)";
+  return undefined;
+}
+
+function getTrackWidth(t: TrackDef): number {
+  if (t.status === "BLOCKED" || t.status === "CONGESTED") return 2.8;
+  if (t.weather === "STORM") return 2.5;
+  if (t.weather === "RAIN" || t.weather === "FOG") return 2.2;
+  return 1.8;
+}
+
+// Weather badge label + color
+function weatherBadge(weather: string): { label: string; color: string; bg: string } | null {
+  if (weather === "STORM") return { label: "⛈ STORM", color: "#C084FC", bg: "rgba(192,132,252,0.15)" };
+  if (weather === "FOG")   return { label: "🌫 FOG",   color: "#94A3B8", bg: "rgba(148,163,184,0.12)" };
+  if (weather === "RAIN")  return { label: "🌧 RAIN",  color: "#60A5FA", bg: "rgba(96,165,250,0.12)" };
+  return null;
 }
 
 export default function NetworkMap({
@@ -53,7 +85,7 @@ export default function NetworkMap({
   const [isDragging, setIsDragging] = useState(false);
   const dragStart = useRef({ x: 0, y: 0 });
   const [hoveredStation, setHoveredStation] = useState<string | null>(null);
-  const [hoveredTrain, setHoveredTrain] = useState<string | null>(null);
+  const [hoveredTrain, setHoveredTrain]     = useState<string | null>(null);
 
   const trackPairs = groupTrackPairs(tracks);
   const selectedTrainData = selectedTrain ? trains[selectedTrain] : null;
@@ -64,8 +96,7 @@ export default function NetworkMap({
     if (cx !== undefined && cy !== undefined) {
       const rect = containerRef.current?.getBoundingClientRect();
       if (rect) {
-        const mx = cx - rect.left;
-        const my = cy - rect.top;
+        const mx = cx - rect.left, my = cy - rect.top;
         v.x = mx - (mx - v.x) * (newZoom / v.zoom);
         v.y = my - (my - v.y) * (newZoom / v.zoom);
       }
@@ -108,11 +139,6 @@ export default function NetworkMap({
     return s ? { x: s.lng, y: s.lat } : { x: 0, y: 0 };
   };
 
-  const trackColor = (t: TrackDef) =>
-    t.status === "BLOCKED" ? "#EF4444"
-    : t.status === "CONGESTED" ? "#F59E0B"
-    : "#1E2A45";
-
   const isStation = (id: string) => stations[id]?.platforms > 0;
 
   return (
@@ -137,76 +163,122 @@ export default function NetworkMap({
         viewBox="0 0 800 750"
       >
         <defs>
-          <filter id="glowCyan"    x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-          <filter id="glowAmber"   x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-          <filter id="glowRed"     x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-          <filter id="glowPurple"  x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-          <filter id="glowMagenta" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="glowCyan"   x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="glowAmber"  x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="glowRed"    x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="glowPurple" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="glowBlue"   x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
         </defs>
 
         <rect x="0" y="0" width="800" height="750" fill="transparent" />
 
-        {/* ── DOUBLE TRACK LINES (parallel offset) ── */}
+        {/* ── DOUBLE TRACKS ── */}
         {Object.entries(trackPairs).map(([baseKey, pair]) => {
           const refTrack = pair.a ?? pair.b;
           if (!refTrack) return null;
+
           const f = pos(refTrack.from);
           const t = pair.a ? pos(pair.a.to) : pos(refTrack.to);
-          const { nx, ny } = getOffsetPoints(f.x, f.y, t.x, t.y, 2.5);
+          const { nx, ny } = getOffset(f.x, f.y, t.x, t.y, 2.5);
 
-          const isOnSelectedRoute = selectedTrainData?.route?.includes(refTrack.from) && selectedTrainData?.route?.includes(refTrack.to);
+          const isOnSelectedRoute =
+            selectedTrainData?.route?.includes(refTrack.from) &&
+            selectedTrainData?.route?.includes(refTrack.to);
+
           const midX = (f.x + t.x) / 2;
           const midY = (f.y + t.y) / 2;
 
+          // Pick the "worse" track for badge display (A or B)
+          const worseTrack = pair.a && (pair.a.weather !== "CLEAR" || pair.a.status !== "OPEN")
+            ? pair.a
+            : pair.b ?? pair.a!;
+
+          const badge = weatherBadge(worseTrack?.weather ?? "");
+
           return (
             <g key={baseKey}>
-              {/* Track A — Up direction (offset +) */}
-              {pair.a && (
-                <line
-                  x1={f.x + nx} y1={f.y + ny}
-                  x2={t.x + nx} y2={t.y + ny}
-                  stroke={isOnSelectedRoute ? (trains[selectedTrain!]?.color ?? trackColor(pair.a)) : trackColor(pair.a)}
-                  strokeWidth={isOnSelectedRoute ? 3.5 : pair.a.status === "BLOCKED" || pair.a.status === "CONGESTED" ? 2.5 : 1.8}
-                  strokeOpacity={isOnSelectedRoute ? 0.5 : 1}
-                  filter={pair.a.status === "BLOCKED" ? "url(#glowRed)" : pair.a.status === "CONGESTED" ? "url(#glowAmber)" : undefined}
-                  strokeLinecap="round"
-                />
-              )}
-              {/* Track B — Down direction (offset -) */}
-              {pair.b && (
-                <line
-                  x1={f.x - nx} y1={f.y - ny}
-                  x2={t.x - nx} y2={t.y - ny}
-                  stroke={isOnSelectedRoute ? (trains[selectedTrain!]?.color ?? trackColor(pair.b)) : trackColor(pair.b)}
-                  strokeWidth={isOnSelectedRoute ? 3.5 : pair.b.status === "BLOCKED" || pair.b.status === "CONGESTED" ? 2.5 : 1.8}
-                  strokeOpacity={isOnSelectedRoute ? 0.5 : 0.65}
-                  strokeDasharray={pair.b.status === "OPEN" ? "none" : undefined}
-                  filter={pair.b.status === "BLOCKED" ? "url(#glowRed)" : pair.b.status === "CONGESTED" ? "url(#glowAmber)" : undefined}
-                  strokeLinecap="round"
-                />
+              {/* Track A (Up) */}
+              {pair.a && (() => {
+                const color = isOnSelectedRoute
+                  ? (trains[selectedTrain!]?.color ?? getTrackColor(pair.a))
+                  : getTrackColor(pair.a);
+                return (
+                  <line
+                    x1={f.x + nx} y1={f.y + ny}
+                    x2={t.x + nx} y2={t.y + ny}
+                    stroke={color}
+                    strokeWidth={isOnSelectedRoute ? 3.5 : getTrackWidth(pair.a)}
+                    strokeOpacity={isOnSelectedRoute ? 0.55 : 1}
+                    filter={!isOnSelectedRoute ? getTrackGlow(pair.a) : undefined}
+                    strokeLinecap="round"
+                  />
+                );
+              })()}
+
+              {/* Track B (Down) */}
+              {pair.b && (() => {
+                const color = isOnSelectedRoute
+                  ? (trains[selectedTrain!]?.color ?? getTrackColor(pair.b))
+                  : getTrackColor(pair.b);
+                return (
+                  <line
+                    x1={f.x - nx} y1={f.y - ny}
+                    x2={t.x - nx} y2={t.y - ny}
+                    stroke={color}
+                    strokeWidth={isOnSelectedRoute ? 3.5 : getTrackWidth(pair.b)}
+                    strokeOpacity={isOnSelectedRoute ? 0.55 : 0.7}
+                    filter={!isOnSelectedRoute ? getTrackGlow(pair.b) : undefined}
+                    strokeLinecap="round"
+                  />
+                );
+              })()}
+
+              {/* Weather badge on segment midpoint */}
+              {badge && !isOnSelectedRoute && (
+                <g>
+                  <rect
+                    x={midX - 18} y={midY - 8}
+                    width={36} height={11}
+                    rx={3}
+                    fill={badge.bg}
+                    stroke={badge.color}
+                    strokeWidth={0.5}
+                    strokeOpacity={0.6}
+                  />
+                  <text
+                    x={midX} y={midY + 1}
+                    textAnchor="middle"
+                    fill={badge.color}
+                    fontSize="6.5"
+                    fontFamily="Inter, sans-serif"
+                    fontWeight={600}
+                  >
+                    {badge.label}
+                  </text>
+                </g>
               )}
 
               {/* Track label */}
               {showTrackLabels && (
                 <text
-                  x={midX} y={midY - 6}
+                  x={midX} y={midY - 10}
                   textAnchor="middle"
-                  fill="#6B7280" fillOpacity="0.45"
+                  fill="#6B7280" fillOpacity="0.4"
                   fontSize="7"
                   fontFamily="JetBrains Mono, monospace"
-                  transform={`rotate(${Math.atan2(t.y - f.y, t.x - f.x) * 180 / Math.PI},${midX},${midY - 6})`}
+                  transform={`rotate(${Math.atan2(t.y - f.y, t.x - f.x) * 180 / Math.PI},${midX},${midY - 10})`}
                 >
                   {baseKey}
                 </text>
               )}
 
-              {/* Track occupancy mini-indicator */}
+              {/* Occupancy dot */}
               {(pair.a?.current_trains ?? 0) + (pair.b?.current_trains ?? 0) > 0 && (
                 <circle
-                  cx={midX} cy={midY}
+                  cx={midX} cy={midY + (badge ? 8 : 0)}
                   r={3}
                   fill={(pair.a?.congestion_level ?? 0) > 70 ? "#F59E0B" : "#10B981"}
-                  fillOpacity={0.7}
+                  fillOpacity={0.75}
                 />
               )}
             </g>
@@ -270,13 +342,13 @@ export default function NetworkMap({
 
         {/* ── TRAIN MARKERS ── */}
         {Object.values(trains).map(train => {
-          const isHov = hoveredTrain === train.train_id;
-          const isSel = selectedTrain === train.train_id;
-          const showDetail = isHov || isSel;
+          const isHov  = hoveredTrain === train.train_id;
+          const isSel  = selectedTrain === train.train_id;
+          const detail = isHov || isSel;
           const isRerouting = train.status === "REROUTING";
-          const isDelayed = train.delay_minutes > 2;
-          const isEarly = train.delay_minutes < -1;
-          const progress = train.position?.progress_percent ?? 0;
+          const isDelayed   = train.delay_minutes > 2;
+          const isEarly     = train.delay_minutes < -1;
+          const progress    = train.position?.progress_percent ?? 0;
 
           return (
             <g key={train.train_id}
@@ -289,51 +361,46 @@ export default function NetworkMap({
                 <circle r={14} fill="none" stroke="#F472B6" strokeWidth={2}
                   style={{ animation: "reroutePulse 1.5s ease-out infinite" }} />
               )}
-              {showDetail && (
+              {detail && (
                 <circle r={18} fill="none" stroke={train.color} strokeWidth={2} strokeOpacity={0.35} />
               )}
 
-              {/* Main dot */}
-              <circle r={showDetail ? 10 : 6} fill={train.color} stroke="white" strokeWidth={showDetail ? 2 : 1.5}
-                filter={showDetail ? "url(#glowCyan)" : undefined}
+              <circle r={detail ? 10 : 6} fill={train.color} stroke="white"
+                strokeWidth={detail ? 2 : 1.5}
+                filter={detail ? "url(#glowCyan)" : undefined}
                 style={{ transition: "r 0.3s ease" }} />
 
               {/* Delay ring */}
-              {isDelayed && !showDetail && (
-                <circle r={9} fill="none" stroke="#F59E0B" strokeWidth={1.5} strokeOpacity={0.6}
-                  strokeDasharray="4 2" />
+              {isDelayed && !detail && (
+                <circle r={9} fill="none" stroke="#F59E0B" strokeWidth={1.5}
+                  strokeOpacity={0.6} strokeDasharray="4 2" />
               )}
-              {isEarly && !showDetail && (
-                <circle r={9} fill="none" stroke="#10B981" strokeWidth={1.5} strokeOpacity={0.6}
-                  strokeDasharray="4 2" />
+              {isEarly && !detail && (
+                <circle r={9} fill="none" stroke="#10B981" strokeWidth={1.5}
+                  strokeOpacity={0.6} strokeDasharray="4 2" />
               )}
 
               {/* Train ID label */}
               {showTrainNames && (
-                <text
-                  x={showDetail ? 0 : 10} y={showDetail ? -14 : -9}
-                  textAnchor={showDetail ? "middle" : "start"}
+                <text x={detail ? 0 : 10} y={detail ? -14 : -9}
+                  textAnchor={detail ? "middle" : "start"}
                   fill={train.color}
-                  fontSize={showDetail ? 11 : 8}
+                  fontSize={detail ? 11 : 8}
                   fontFamily="JetBrains Mono, monospace" fontWeight={600}>
-                  {train.train_id}
-                  {showDetail && ` · ${train.current_speed_kmh}km/h`}
+                  {train.train_id}{detail && ` · ${train.current_speed_kmh}km/h`}
                 </text>
               )}
 
-              {/* Hover/Select detail card */}
-              {showDetail && (
+              {/* Detail card */}
+              {detail && (
                 <g transform="translate(18, -65)">
-                  <rect x={0} y={0} width={175} height={110} rx={8}
+                  <rect x={0} y={0} width={178} height={112} rx={8}
                     fill="#1A2236" stroke={train.color} strokeWidth={1} strokeOpacity={0.4}
                     style={{ filter: "drop-shadow(0 4px 16px rgba(0,0,0,0.6))" }} />
-
-                  {/* Header */}
-                  <rect x={0} y={0} width={175} height={20} rx={8} fill={train.color} fillOpacity={0.15} />
+                  <rect x={0} y={0} width={178} height={20} rx={8} fill={train.color} fillOpacity={0.15} />
                   <text x={10} y={14} fill={train.color} fontSize="10" fontFamily="JetBrains Mono, monospace" fontWeight={700}>
                     {train.train_id} — {train.name}
                   </text>
-
                   <text x={10} y={31} fill="#E5E7EB" fontSize="9" fontFamily="JetBrains Mono, monospace">
                     Speed: {train.current_speed_kmh} km/h
                   </text>
@@ -343,26 +410,27 @@ export default function NetworkMap({
                   <text x={10} y={57} fill="#E5E7EB" fontSize="9" fontFamily="JetBrains Mono, monospace">
                     Next: {train.next_station} ({train.distance_to_next_km.toFixed(1)} km)
                   </text>
-
-                  {/* Delay / On-time badge */}
-                  <text x={10} y={71}
+                  <text x={10} y={70}
                     fill={isDelayed ? "#F59E0B" : isEarly ? "#10B981" : "#10B981"}
                     fontSize="9" fontFamily="JetBrains Mono, monospace">
                     {isDelayed ? `⚠ Delayed +${train.delay_minutes.toFixed(1)}m`
-                      : isEarly ? `✓ Early ${train.delay_minutes.toFixed(1)}m`
+                      : isEarly  ? `✓ Early ${train.delay_minutes.toFixed(1)}m`
                       : "✓ On Time"}
                   </text>
-
-                  {/* Route progress bar */}
                   <text x={10} y={83} fill="#6B7280" fontSize="8" fontFamily="JetBrains Mono, monospace">
                     Route {progress.toFixed(0)}%
                   </text>
-                  <rect x={10} y={87} width={155} height={3} rx={1.5} fill="#1E2A45" />
-                  <rect x={10} y={87} width={155 * progress / 100} height={3} rx={1.5} fill={train.color} />
-
-                  {/* Signal */}
-                  <circle cx={155} cy={31} r={4}
+                  <rect x={10} y={87} width={158} height={3} rx={1.5} fill="#1E2A45" />
+                  <rect x={10} y={87} width={158 * progress / 100} height={3} rx={1.5} fill={train.color} />
+                  {/* Signal dot */}
+                  <circle cx={162} cy={31} r={4}
                     fill={train.signal === "GREEN" ? "#10B981" : train.signal === "YELLOW" ? "#F59E0B" : "#EF4444"} />
+                  {/* Weather badge on card if train affected */}
+                  {train.weather !== "CLEAR" && (
+                    <text x={10} y={100} fill="#94A3B8" fontSize="8" fontFamily="Inter, sans-serif">
+                      {train.weather === "STORM" ? "⛈ STORM" : train.weather === "FOG" ? "🌫 FOG" : "🌧 RAIN"}
+                    </text>
+                  )}
                 </g>
               )}
             </g>
@@ -385,24 +453,41 @@ export default function NetworkMap({
       </div>
 
       {/* Legend */}
-      <div className="absolute top-3 right-3 p-2 rounded-lg text-[9px]"
-        style={{ backgroundColor: "rgba(17,24,39,0.85)", border: "1px solid #1E2A45", fontFamily: "JetBrains Mono, monospace" }}>
-        <div style={{ color: "#6B7280", marginBottom: 4, fontSize: 8, letterSpacing: "0.5px", textTransform: "uppercase" }}>Track Legend</div>
-        <div className="flex items-center gap-1.5 mb-1">
-          <div style={{ display: "flex", gap: 1 }}>
-            <div style={{ width: 16, height: 2, background: "#1E2A45", borderRadius: 1 }} />
-            <div style={{ width: 16, height: 2, background: "#1E2A45", borderRadius: 1, opacity: 0.6 }} />
+      <div className="absolute top-3 right-3 p-2.5 rounded-lg"
+        style={{ backgroundColor: "rgba(17,24,39,0.9)", border: "1px solid #1E2A45", fontFamily: "Inter, sans-serif", minWidth: 130 }}>
+        <div style={{ color: "#6B7280", marginBottom: 6, fontSize: 8, letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 600 }}>
+          Track Legend
+        </div>
+
+        {/* Track types */}
+        {[
+          { color: "#1E2A45",  label: "Clear (Up track)" },
+          { color: "#1E2A45",  label: "Clear (Down track)", opacity: 0.6 },
+          { color: "#F59E0B",  label: "Congested" },
+          { color: "#EF4444",  label: "Blocked" },
+        ].map(item => (
+          <div key={item.label} className="flex items-center gap-2 mb-1">
+            <div style={{ width: 18, height: 2.5, background: item.color, borderRadius: 1, opacity: item.opacity ?? 1, flexShrink: 0 }} />
+            <span style={{ color: "#9CA3AF", fontSize: 9 }}>{item.label}</span>
           </div>
-          <span style={{ color: "#9CA3AF" }}>Up / Down track</span>
+        ))}
+
+        {/* Separator */}
+        <div style={{ height: 1, background: "#1E2A45", margin: "5px 0" }} />
+        <div style={{ color: "#6B7280", marginBottom: 4, fontSize: 8, letterSpacing: "0.5px", textTransform: "uppercase", fontWeight: 600 }}>
+          Weather
         </div>
-        <div className="flex items-center gap-1.5 mb-1">
-          <div style={{ width: 16, height: 2, background: "#F59E0B", borderRadius: 1 }} />
-          <span style={{ color: "#9CA3AF" }}>Congested</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div style={{ width: 16, height: 2, background: "#EF4444", borderRadius: 1 }} />
-          <span style={{ color: "#9CA3AF" }}>Blocked</span>
-        </div>
+
+        {[
+          { color: "#60A5FA", label: "🌧 Rain" },
+          { color: "#94A3B8", label: "🌫 Fog" },
+          { color: "#C084FC", label: "⛈ Storm" },
+        ].map(item => (
+          <div key={item.label} className="flex items-center gap-2 mb-1">
+            <div style={{ width: 18, height: 2.5, background: item.color, borderRadius: 1, flexShrink: 0 }} />
+            <span style={{ color: "#9CA3AF", fontSize: 9 }}>{item.label}</span>
+          </div>
+        ))}
       </div>
     </div>
   );

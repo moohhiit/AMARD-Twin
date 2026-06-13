@@ -17,6 +17,7 @@ import trackRoutes from "./routes/tracks";
 import stationRoutes from "./routes/stations";
 import routeRoutes from "./routes/routes";
 import simulationRoutes from "./routes/simulation";
+import dashboardRoutes from "./routes/dashboard";
 
 const app = express();
 const httpServer = createServer(app);
@@ -34,7 +35,7 @@ app.use("/api/v1/tracks", trackRoutes);
 app.use("/api/v1/stations", stationRoutes);
 app.use("/api/v1/routes", routeRoutes);
 app.use("/api/v1/simulation", simulationRoutes);
-
+app.use("/api/v1/dashboard", dashboardRoutes);
 // Health check
 app.get("/health", async (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });

@@ -1,6 +1,17 @@
 import mongoose, { Schema, Document } from "mongoose";
 import type { TrainStatus, Position, AgentType } from "../../types";
 
+export interface IScheduleStop {
+  station_id: string;
+  scheduled_arrival: string;
+  scheduled_departure: string;
+  halt_minutes: number;
+  platform_preference: number | null;
+  actual_arrival?: string | null;
+  actual_departure?: string | null;
+  delay_minutes?: number;
+}
+
 export interface ITrainDocument extends Document {
   train_id: string;
   name: string;
@@ -24,6 +35,7 @@ export interface ITrainDocument extends Document {
     reason: string;
   } | null;
   color: string;
+  schedule: IScheduleStop[];
   created_at: Date;
   updated_at: Date;
 }
@@ -35,6 +47,20 @@ const PositionSchema = new Schema(
     progress_percent: { type: Number, required: true, default: 0 },
     lat: { type: Number, required: true },
     lng: { type: Number, required: true },
+  },
+  { _id: false }
+);
+
+const ScheduleStopSchema = new Schema<IScheduleStop>(
+  {
+    station_id:          { type: String, required: true },
+    scheduled_arrival:   { type: String, required: true },
+    scheduled_departure: { type: String, required: true },
+    halt_minutes:        { type: Number, default: 0 },
+    platform_preference: { type: Number, default: null },
+    actual_arrival:      { type: String, default: null },
+    actual_departure:    { type: String, default: null },
+    delay_minutes:       { type: Number, default: 0 },
   },
   { _id: false }
 );
@@ -68,6 +94,7 @@ const TrainSchema = new Schema<ITrainDocument>(
       _id: false,
     },
     color: { type: String, required: true },
+    schedule: { type: [ScheduleStopSchema], default: [] },
   },
   { timestamps: true }
 );

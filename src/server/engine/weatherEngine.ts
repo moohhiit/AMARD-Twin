@@ -76,11 +76,14 @@ export class WeatherEngine {
     }
   }
 
-  /** Real-wall-clock ms between weather updates (scales with sim speed) */
+  /** Real-wall-clock ms between weather updates.
+   *  Weather is a slow-changing environmental factor.
+   *  Minimum 3 minutes real-time regardless of sim speed.
+   *  At 1x speed -> every 8 minutes real-time.
+   *  Prevents weather flickering at high sim speeds.
+   */
   private getIntervalMs(): number {
-    // Base: 30 s at 1×. At N× speed, weather changes N× faster in sim time,
-    // so wall-clock interval shrinks proportionally.
-    return Math.max(500, Math.round(30_000 / this.simulationSpeed));
+    return Math.max(180_000, Math.round(480_000 / this.simulationSpeed));
   }
 
   init(segmentIds: string[]): void {

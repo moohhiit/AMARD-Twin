@@ -1,15 +1,14 @@
 /**
  * scripts/seedMongo.ts
  *
- * Updated seed file aligned with all V2 changes:
- *  ✅ Full ScheduleStop[] per train (arrival + departure HH:MM, halt, platform preference)
- *  ✅ schedule field added to Train schema (cast as any to bypass strict schema typing)
- *  ✅ Staggered real-world departure times (06:00–08:30 morning rush + overnight)
- *  ✅ Realistic halt durations per station class (major=5min, minor=2min, terminus=10min)
- *  ✅ All 20 trains across 6 corridors
- *  ✅ Platform configs matching change audit (DEL=6, MUM=5, CHN=5, KOL=4, etc.)
- *  ✅ Early arrival scenario built into T-102's schedule for testing
- *  ✅ Delayed scenario pre-baked into T-117 (long-haul, delay_minutes=8)
+ *  ✅ 20 trains across 6 corridors with full ScheduleStop[] (arrival+departure HH:MM)
+ *  ✅ Realistic halt durations — major=5m, minor=2m, terminus=10m
+ *  ✅ Staggered departure times 05:30–08:30 (morning rush) + overnight (20:00)
+ *  ✅ T-117 pre-seeded with delay_minutes=8 (tests delay display + rerouting agent)
+ *  ✅ T-102 built with early arrival scenario
+ *  ✅ Platform configs for all 10 major stations
+ *  ✅ 5 seed TrainEvents so history panel is non-empty on first load
+ *  ✅ Initial weather events for pre-seeded weather segments matching seedNeo4j
  *
  * Run: npm run seed:mongo
  */
@@ -21,7 +20,7 @@ import { PlatformLogModel } from "../src/server/models/mongo/PlatformLog";
 import { TrainEventModel }  from "../src/server/models/mongo/TrainEvent";
 import logger from "../src/server/utils/logger";
 
-// ─── STATION COORDS ──────────────────────────────────────────────────────────
+// ─── STATION COORDS (must match seedNeo4j + networkConstants) ─────────────
 const COORDS: Record<string, { lat: number; lng: number }> = {
   DEL:  { lat: 120, lng: 130 },
   MUM:  { lat: 430, lng: 80  },
@@ -46,14 +45,11 @@ const COORDS: Record<string, { lat: number; lng: number }> = {
 };
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
-
-/** Convert HH:MM to total minutes */
 function toMin(hhmm: string): number {
   const [h, m] = hhmm.split(":").map(Number);
   return h * 60 + m;
 }
 
-/** Add minutes to HH:MM → return new HH:MM */
 function addMin(hhmm: string, minutes: number): string {
   const total = (toMin(hhmm) + minutes) % (24 * 60);
   const h = Math.floor(total / 60);
@@ -61,44 +57,38 @@ function addMin(hhmm: string, minutes: number): string {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
 
-/**
- * Build a ScheduleStop[] from a route + segment travel times + halt config.
- * Junctions are skipped (no platforms, no schedule stop).
- *
- * @param route        Full route node array
- * @param departTime   HH:MM departure from first station
- * @param travelMins   Travel time in sim-minutes between consecutive nodes
- *                     (length = route.length - 1)
- * @param haltMins     Halt time per station (indexed to stations only)
- * @param platformPref Platform preference per station (null = any)
- */
 const JUNCTIONS = new Set([
   "J_NW","J_NC","J_NE","J_CW","J_CN","J_CE","J_MW","J_MC","J_SW","J_SC",
 ]);
 
+/**
+ * Build ScheduleStop[] from a route.
+ * Junctions are skipped (no scheduled stop).
+ * Terminus gets at least 10m halt.
+ */
 function buildSchedule(
-  route: string[],
-  departTime: string,
-  travelMins: number[],
-  haltMins: number[],
+  route:       string[],
+  departTime:  string,
+  travelMins:  number[],
+  haltMins:    number[],
   platformPref: (number | null)[],
-): Array<{
-  station_id: string;
-  scheduled_arrival: string;
-  scheduled_departure: string;
-  platform_preference: number | null;
-  halt_minutes: number;
-}> {
-  const stops: ReturnType<typeof buildSchedule> = [];
-  let cursor = departTime;  // current sim time
+) {
+  const stops: Array<{
+    station_id:          string;
+    scheduled_arrival:   string;
+    scheduled_departure: string;
+    platform_preference: number | null;
+    halt_minutes:        number;
+  }> = [];
+
+  let cursor  = departTime;
   let haltIdx = 0;
 
   for (let i = 0; i < route.length; i++) {
-    const node = route[i];
+    const node   = route[i];
     const travel = travelMins[i] ?? 0;
 
     if (i === 0) {
-      // Origin — arrival = departure = departTime
       if (!JUNCTIONS.has(node)) {
         const halt = haltMins[haltIdx] ?? 5;
         stops.push({
@@ -112,11 +102,10 @@ function buildSchedule(
         haltIdx++;
       }
     } else {
-      // Arrive after travel time
       cursor = addMin(cursor, travel);
       if (!JUNCTIONS.has(node)) {
-        const halt = haltMins[haltIdx] ?? 2;
-        const isTerminus = i === route.length - 1;
+        const isTerminus    = i === route.length - 1;
+        const halt          = haltMins[haltIdx] ?? 2;
         const effectiveHalt = isTerminus ? Math.max(halt, 10) : halt;
         stops.push({
           station_id:          node,
@@ -135,495 +124,410 @@ function buildSchedule(
 }
 
 // ─── TRAIN DEFINITIONS ───────────────────────────────────────────────────────
-//
-// Travel times are in sim-minutes at 1× speed.
-// At higher speed multipliers the engine advances the clock proportionally.
-// Values are approximate (distance_km / avg_speed_kmh × 60), realistic for IR.
 
 const trains = [
 
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
   // NORTH CORRIDOR
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
 
-  // 101 — Rajdhani Express  DEL→KOL  SUPERFAST
-  // Route: DEL → J_NW → AGR → J_NC → J_NE → PAT → KOL
-  // Travel (mins): DEL→J_NW=100, J_NW→AGR=55, AGR→J_NC=85, J_NC→J_NE=120, J_NE→PAT=65, PAT→KOL=180
+  // T-101  Rajdhani Express  DEL→KOL  SUPERFAST
   (() => {
-    const route = ["DEL","J_NW","AGR","J_NC","J_NE","PAT","KOL"];
-    const schedule = buildSchedule(
-      route, "06:00",
+    const route    = ["DEL","J_NW","AGR","J_NC","J_NE","PAT","KOL"];
+    const schedule = buildSchedule(route, "06:00",
       [100, 55, 85, 120, 65, 180],
-      [5,   3,  3,   3,  10],       // DEL=5, AGR=3, PAT=3, KOL=terminus
-      [1,   2,  null, null, 1],
-    );
+      [5, 3, 3, 3, 10],
+      [1, 2, null, null, 1]);
     return {
-      train_id: "101", name: "Rajdhani Express", type: "SUPERFAST",
-      length_meters: 260, max_speed_kmh: 160, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "DEL", to_node: "J_NW", progress_percent: 0, ...COORDS["DEL"] },
-      scheduled_departure: new Date(), actual_departure: new Date(),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#3B82F6", schedule,
+      train_id:"101", name:"Rajdhani Express", type:"SUPERFAST",
+      length_meters:260, max_speed_kmh:160, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"DEL", to_node:"J_NW", progress_percent:0, ...COORDS["DEL"] },
+      scheduled_departure:new Date(), actual_departure:new Date(),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#3B82F6", schedule,
     };
   })(),
 
-  // 102 — Shatabdi Express  KOL→DEL  EXPRESS  (reverse direction, slight early arrival baked in)
-  // Route: KOL → PAT → J_NE → J_NC → AGR → DEL
+  // T-102  Shatabdi Express  KOL→DEL  EXPRESS  (early arrival scenario)
   (() => {
-    const route = ["KOL","PAT","J_NE","J_NC","AGR","J_NW","DEL"];
-    const schedule = buildSchedule(
-      route, "06:30",
+    const route    = ["KOL","PAT","J_NE","J_NC","AGR","J_NW","DEL"];
+    const schedule = buildSchedule(route, "06:30",
       [180, 65, 120, 85, 120, 100],
-      [5,   3,   3,   3,   3,   10],
-      [2,   null, null, 1, null, 2],
-    );
+      [5, 3, 3, 3, 3, 10],
+      [2, null, null, 1, null, 2]);
     return {
-      train_id: "102", name: "Shatabdi Express", type: "EXPRESS",
-      length_meters: 200, max_speed_kmh: 130, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "KOL", to_node: "PAT", progress_percent: 0, ...COORDS["KOL"] },
-      scheduled_departure: new Date(Date.now() + 30 * 60000),
-      actual_departure: new Date(Date.now() + 30 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#00E5FF", schedule,
+      train_id:"102", name:"Shatabdi Express", type:"EXPRESS",
+      length_meters:200, max_speed_kmh:130, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"KOL", to_node:"PAT", progress_percent:0, ...COORDS["KOL"] },
+      scheduled_departure:new Date(Date.now()+30*60000), actual_departure:new Date(Date.now()+30*60000),
+      delay_minutes:-3, // early arrival scenario
+      assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#00E5FF", schedule,
     };
   })(),
 
-  // 103 — Jan Shatabdi  DEL→HYD  PASSENGER
-  // Route: DEL → J_NW → AGR → J_CN → HYD
+  // T-103  Jan Shatabdi  DEL→HYD  PASSENGER
   (() => {
-    const route = ["DEL","J_NW","AGR","J_CN","HYD"];
-    const schedule = buildSchedule(
-      route, "07:00",
+    const route    = ["DEL","J_NW","AGR","J_CN","HYD"];
+    const schedule = buildSchedule(route, "07:00",
       [100, 55, 190, 160],
-      [5,   4,   3,  10],
-      [3,   2,   null, 1],
-    );
+      [5, 4, 3, 10],
+      [3, 2, null, 1]);
     return {
-      train_id: "103", name: "Jan Shatabdi", type: "PASSENGER",
-      length_meters: 180, max_speed_kmh: 110, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "DEL", to_node: "J_NW", progress_percent: 0, ...COORDS["DEL"] },
-      scheduled_departure: new Date(Date.now() + 60 * 60000),
-      actual_departure: new Date(Date.now() + 60 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#F472B6", schedule,
+      train_id:"103", name:"Jan Shatabdi", type:"PASSENGER",
+      length_meters:180, max_speed_kmh:110, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"DEL", to_node:"J_NW", progress_percent:0, ...COORDS["DEL"] },
+      scheduled_departure:new Date(Date.now()+60*60000), actual_departure:new Date(Date.now()+60*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#F472B6", schedule,
     };
   })(),
 
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
   // WEST CORRIDOR
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
 
-  // 104 — Gujarat Mail  DEL→MUM  EXPRESS
-  // Route: DEL → J_CW → SUR → MUM
+  // T-104  Gujarat Mail  DEL→MUM  EXPRESS
   (() => {
-    const route = ["DEL","J_CW","SUR","MUM"];
-    const schedule = buildSchedule(
-      route, "06:15",
+    const route    = ["DEL","J_CW","SUR","MUM"];
+    const schedule = buildSchedule(route, "06:15",
       [180, 77, 101],
-      [5,   4,  10],
-      [2,   1,   2],
-    );
+      [5, 4, 10],
+      [2, 1, 2]);
     return {
-      train_id: "104", name: "Gujarat Mail", type: "EXPRESS",
-      length_meters: 300, max_speed_kmh: 120, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "DEL", to_node: "J_CW", progress_percent: 0, ...COORDS["DEL"] },
-      scheduled_departure: new Date(Date.now() + 15 * 60000),
-      actual_departure: new Date(Date.now() + 15 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#F59E0B", schedule,
+      train_id:"104", name:"Gujarat Mail", type:"EXPRESS",
+      length_meters:300, max_speed_kmh:120, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"DEL", to_node:"J_CW", progress_percent:0, ...COORDS["DEL"] },
+      scheduled_departure:new Date(Date.now()+15*60000), actual_departure:new Date(Date.now()+15*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#F59E0B", schedule,
     };
   })(),
 
-  // 105 — Mumbai Express  MUM→DEL  SUPERFAST
-  // Route: MUM → SUR → J_CW → DEL
+  // T-105  Mumbai Express  MUM→DEL  SUPERFAST
   (() => {
-    const route = ["MUM","SUR","J_CW","DEL"];
-    const schedule = buildSchedule(
-      route, "06:00",
+    const route    = ["MUM","SUR","J_CW","DEL"];
+    const schedule = buildSchedule(route, "06:00",
       [101, 77, 180],
-      [5,   3,  10],
-      [1,   null, 3],
-    );
+      [5, 3, 10],
+      [1, null, 3]);
     return {
-      train_id: "105", name: "Mumbai Express", type: "SUPERFAST",
-      length_meters: 240, max_speed_kmh: 150, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "MUM", to_node: "SUR", progress_percent: 0, ...COORDS["MUM"] },
-      scheduled_departure: new Date(),
-      actual_departure: new Date(),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#10B981", schedule,
+      train_id:"105", name:"Mumbai Express", type:"SUPERFAST",
+      length_meters:240, max_speed_kmh:150, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"MUM", to_node:"SUR", progress_percent:0, ...COORDS["MUM"] },
+      scheduled_departure:new Date(), actual_departure:new Date(),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#10B981", schedule,
     };
   })(),
 
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
   // CENTRAL CORRIDOR
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
 
-  // 106 — Deccan Queen  DEL→HYD via Nagpur+Solapur  PASSENGER
-  // Route: DEL → J_CN → J_MC → HYD
+  // T-106  Deccan Queen  DEL→HYD  PASSENGER
   (() => {
-    const route = ["DEL","J_CN","J_MC","HYD"];
-    const schedule = buildSchedule(
-      route, "07:30",
+    const route    = ["DEL","J_CN","J_MC","HYD"];
+    const schedule = buildSchedule(route, "07:30",
       [265, 138, 115],
-      [5,   10],
-      [4,    1],
-    );
+      [5, 10],
+      [4, 1]);
     return {
-      train_id: "106", name: "Deccan Queen", type: "PASSENGER",
-      length_meters: 280, max_speed_kmh: 100, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "DEL", to_node: "J_CN", progress_percent: 0, ...COORDS["DEL"] },
-      scheduled_departure: new Date(Date.now() + 90 * 60000),
-      actual_departure: new Date(Date.now() + 90 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#8B5CF6", schedule,
+      train_id:"106", name:"Deccan Queen", type:"PASSENGER",
+      length_meters:280, max_speed_kmh:100, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"DEL", to_node:"J_CN", progress_percent:0, ...COORDS["DEL"] },
+      scheduled_departure:new Date(Date.now()+90*60000), actual_departure:new Date(Date.now()+90*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#8B5CF6", schedule,
     };
   })(),
 
-  // 107 — Nizam Express  HYD→DEL  EXPRESS
-  // Route: HYD → J_CN → AGR → J_NW → DEL
+  // T-107  Nizam Express  HYD→DEL  EXPRESS
   (() => {
-    const route = ["HYD","J_CN","AGR","J_NW","DEL"];
-    const schedule = buildSchedule(
-      route, "06:45",
+    const route    = ["HYD","J_CN","AGR","J_NW","DEL"];
+    const schedule = buildSchedule(route, "06:45",
       [166, 190, 120, 100],
-      [5,   4,    3,   10],
-      [2,   1,   null,  4],
-    );
+      [5, 4, 3, 10],
+      [2, 1, null, 4]);
     return {
-      train_id: "107", name: "Nizam Express", type: "EXPRESS",
-      length_meters: 220, max_speed_kmh: 130, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "HYD", to_node: "J_CN", progress_percent: 0, ...COORDS["HYD"] },
-      scheduled_departure: new Date(Date.now() + 45 * 60000),
-      actual_departure: new Date(Date.now() + 45 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#EF4444", schedule,
+      train_id:"107", name:"Nizam Express", type:"EXPRESS",
+      length_meters:220, max_speed_kmh:130, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"HYD", to_node:"J_CN", progress_percent:0, ...COORDS["HYD"] },
+      scheduled_departure:new Date(Date.now()+45*60000), actual_departure:new Date(Date.now()+45*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#EF4444", schedule,
     };
   })(),
 
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
   // SOUTH CORRIDOR
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
 
-  // 108 — Bangalore Mail  DEL→BLR  EXPRESS
-  // Route: DEL → J_CN → HYD → J_SC → BLR
+  // T-108  Bangalore Mail  DEL→BLR  EXPRESS
   (() => {
-    const route = ["DEL","J_CN","HYD","J_SC","BLR"];
-    const schedule = buildSchedule(
-      route, "08:00",
+    const route    = ["DEL","J_CN","HYD","J_SC","BLR"];
+    const schedule = buildSchedule(route, "08:00",
       [265, 166, 110, 125],
-      [5,    5,   5,  10],
-      [5,    2,   1,   2],
-    );
+      [5, 5, 5, 10],
+      [5, 2, 1, 2]);
     return {
-      train_id: "108", name: "Bangalore Mail", type: "EXPRESS",
-      length_meters: 250, max_speed_kmh: 120, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "DEL", to_node: "J_CN", progress_percent: 0, ...COORDS["DEL"] },
-      scheduled_departure: new Date(Date.now() + 120 * 60000),
-      actual_departure: new Date(Date.now() + 120 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#06B6D4", schedule,
+      train_id:"108", name:"Bangalore Mail", type:"EXPRESS",
+      length_meters:250, max_speed_kmh:120, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"DEL", to_node:"J_CN", progress_percent:0, ...COORDS["DEL"] },
+      scheduled_departure:new Date(Date.now()+120*60000), actual_departure:new Date(Date.now()+120*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#06B6D4", schedule,
     };
   })(),
 
-  // 109 — Chennai Express  MUM→CHN via Pune+Solapur+Hyderabad  SUPERFAST
-  // Route: MUM → J_MW → J_MC → HYD → J_CE → CHN
+  // T-109  Chennai Express  MUM→CHN  SUPERFAST
   (() => {
-    const route = ["MUM","J_MW","J_MC","HYD","J_CE","CHN"];
-    const schedule = buildSchedule(
-      route, "06:00",
+    const route    = ["MUM","J_MW","J_MC","HYD","J_CE","CHN"];
+    const schedule = buildSchedule(route, "06:00",
       [87, 100, 115, 124, 88],
-      [5,   5,   5,   10],
-      [1,   2,   3,    1],
-    );
+      [5, 5, 5, 10],
+      [1, 2, 3, 1]);
     return {
-      train_id: "109", name: "Chennai Express", type: "SUPERFAST",
-      length_meters: 270, max_speed_kmh: 140, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "MUM", to_node: "J_MW", progress_percent: 0, ...COORDS["MUM"] },
-      scheduled_departure: new Date(),
-      actual_departure: new Date(),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#EC4899", schedule,
+      train_id:"109", name:"Chennai Express", type:"SUPERFAST",
+      length_meters:270, max_speed_kmh:140, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"MUM", to_node:"J_MW", progress_percent:0, ...COORDS["MUM"] },
+      scheduled_departure:new Date(), actual_departure:new Date(),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#EC4899", schedule,
     };
   })(),
 
-  // 110 — Karnataka Express  BLR→DEL  EXPRESS
-  // Route: BLR → J_SC → HYD → J_CN → DEL
+  // T-110  Karnataka Express  BLR→DEL  EXPRESS
   (() => {
-    const route = ["BLR","J_SC","HYD","J_CN","DEL"];
-    const schedule = buildSchedule(
-      route, "06:30",
+    const route    = ["BLR","J_SC","HYD","J_CN","DEL"];
+    const schedule = buildSchedule(route, "06:30",
       [125, 110, 166, 265],
-      [5,   5,   5,   10],
-      [3,   2,   1,    6],
-    );
+      [5, 5, 5, 10],
+      [3, 2, 1, 6]);
     return {
-      train_id: "110", name: "Karnataka Express", type: "EXPRESS",
-      length_meters: 230, max_speed_kmh: 115, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "BLR", to_node: "J_SC", progress_percent: 0, ...COORDS["BLR"] },
-      scheduled_departure: new Date(Date.now() + 30 * 60000),
-      actual_departure: new Date(Date.now() + 30 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#84CC16", schedule,
+      train_id:"110", name:"Karnataka Express", type:"EXPRESS",
+      length_meters:230, max_speed_kmh:115, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"BLR", to_node:"J_SC", progress_percent:0, ...COORDS["BLR"] },
+      scheduled_departure:new Date(Date.now()+30*60000), actual_departure:new Date(Date.now()+30*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#84CC16", schedule,
     };
   })(),
 
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
   // EAST CORRIDOR
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
 
-  // 111 — Coromandel Express  KOL→CHN  SUPERFAST
-  // Route: KOL → J_CE → CHN
+  // T-111  Coromandel Express  KOL→CHN  SUPERFAST
   (() => {
-    const route = ["KOL","J_CE","CHN"];
-    const schedule = buildSchedule(
-      route, "06:00",
+    const route    = ["KOL","J_CE","CHN"];
+    const schedule = buildSchedule(route, "06:00",
       [260, 88],
-      [5,   10],
-      [1,    2],
-    );
+      [5, 10],
+      [1, 2]);
     return {
-      train_id: "111", name: "Coromandel Express", type: "SUPERFAST",
-      length_meters: 290, max_speed_kmh: 130, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "KOL", to_node: "J_CE", progress_percent: 0, ...COORDS["KOL"] },
-      scheduled_departure: new Date(),
-      actual_departure: new Date(),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#F97316", schedule,
+      train_id:"111", name:"Coromandel Express", type:"SUPERFAST",
+      length_meters:290, max_speed_kmh:130, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"KOL", to_node:"J_CE", progress_percent:0, ...COORDS["KOL"] },
+      scheduled_departure:new Date(), actual_departure:new Date(),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#F97316", schedule,
     };
   })(),
 
-  // 112 — Howrah Express  CHN→KOL via Vijayawada+Hyderabad+Nagpur+Patna  EXPRESS
-  // Route: CHN → J_CE → HYD → J_CN → AGR → J_NE → PAT → KOL
+  // T-112  Howrah Express  CHN→KOL  EXPRESS
   (() => {
-    const route = ["CHN","J_CE","HYD","J_CN","AGR","J_NE","PAT","KOL"];
-    const schedule = buildSchedule(
-      route, "08:30",
+    const route    = ["CHN","J_CE","HYD","J_CN","AGR","J_NE","PAT","KOL"];
+    const schedule = buildSchedule(route, "08:30",
       [88, 124, 166, 190, 300, 65, 180],
-      [5,   5,   5,   4,   3,  10],
-      [3,   3,   1,   2,  null, 3],
-    );
+      [5, 5, 5, 4, 3, 10],
+      [3, 3, 1, 2, null, 3]);
     return {
-      train_id: "112", name: "Howrah Express", type: "EXPRESS",
-      length_meters: 260, max_speed_kmh: 120, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "CHN", to_node: "J_CE", progress_percent: 0, ...COORDS["CHN"] },
-      scheduled_departure: new Date(Date.now() + 150 * 60000),
-      actual_departure: new Date(Date.now() + 150 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#A855F7", schedule,
+      train_id:"112", name:"Howrah Express", type:"EXPRESS",
+      length_meters:260, max_speed_kmh:120, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"CHN", to_node:"J_CE", progress_percent:0, ...COORDS["CHN"] },
+      scheduled_departure:new Date(Date.now()+150*60000), actual_departure:new Date(Date.now()+150*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#A855F7", schedule,
     };
   })(),
 
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
   // COASTAL / GOA
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
 
-  // 113 — Konkan Railway  MUM→GOA  PASSENGER
-  // Route: MUM → J_SW → GOA
+  // T-113  Konkan Railway  MUM→GOA  PASSENGER
+  // NOTE: MUM-JSW segment has RAIN weather — train will show weather slowdown
   (() => {
-    const route = ["MUM","J_SW","GOA"];
-    const schedule = buildSchedule(
-      route, "07:00",
+    const route    = ["MUM","J_SW","GOA"];
+    const schedule = buildSchedule(route, "07:00",
       [204, 160],
-      [5,   10],
-      [3,    1],
-    );
+      [5, 10],
+      [3, 1]);
     return {
-      train_id: "113", name: "Konkan Railway", type: "PASSENGER",
-      length_meters: 190, max_speed_kmh: 90, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "MUM", to_node: "J_SW", progress_percent: 0, ...COORDS["MUM"] },
-      scheduled_departure: new Date(Date.now() + 60 * 60000),
-      actual_departure: new Date(Date.now() + 60 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#14B8A6", schedule,
+      train_id:"113", name:"Konkan Railway", type:"PASSENGER",
+      length_meters:190, max_speed_kmh:90, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"MUM", to_node:"J_SW", progress_percent:0, ...COORDS["MUM"] },
+      scheduled_departure:new Date(Date.now()+60*60000), actual_departure:new Date(Date.now()+60*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#14B8A6", schedule,
     };
   })(),
 
-  // 114 — Mandovi Express  GOA→HYD via BLR+Bidar  EXPRESS
-  // Route: GOA → BLR → J_SC → HYD
+  // T-114  Mandovi Express  GOA→HYD  EXPRESS
   (() => {
-    const route = ["GOA","BLR","J_SC","HYD"];
-    const schedule = buildSchedule(
-      route, "06:00",
+    const route    = ["GOA","BLR","J_SC","HYD"];
+    const schedule = buildSchedule(route, "06:00",
       [282, 125, 110],
-      [5,   5,   10],
-      [2,   1,    3],
-    );
+      [5, 5, 10],
+      [2, 1, 3]);
     return {
-      train_id: "114", name: "Mandovi Express", type: "EXPRESS",
-      length_meters: 210, max_speed_kmh: 100, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "GOA", to_node: "BLR", progress_percent: 0, ...COORDS["GOA"] },
-      scheduled_departure: new Date(),
-      actual_departure: new Date(),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#FB923C", schedule,
+      train_id:"114", name:"Mandovi Express", type:"EXPRESS",
+      length_meters:210, max_speed_kmh:100, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"GOA", to_node:"BLR", progress_percent:0, ...COORDS["GOA"] },
+      scheduled_departure:new Date(), actual_departure:new Date(),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#FB923C", schedule,
     };
   })(),
 
-  // ══════════════════════════════════════════════════════════════════
-  // MUMBAI LOOP TRAINS
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
+  // MUMBAI LOOP
+  // ════════════════════════════════════════
 
-  // 115 — Deccan Exp (local loop)  MUM→BLR via Pune+Solapur+Bidar  LOCAL
-  // Route: MUM → J_MW → J_MC → J_SC → BLR
+  // T-115  Deccan Exp  MUM→BLR (loop)  LOCAL
   (() => {
-    const route = ["MUM","J_MW","J_MC","J_SC","BLR"];
-    const schedule = buildSchedule(
-      route, "06:00",
+    const route    = ["MUM","J_MW","J_MC","J_SC","BLR"];
+    const schedule = buildSchedule(route, "06:00",
       [87, 100, 115, 125],
-      [5,   10],
-      [2,    4],
-    );
+      [5, 10],
+      [2, 4]);
     return {
-      train_id: "115", name: "Deccan Exp", type: "LOCAL",
-      length_meters: 150, max_speed_kmh: 110, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "MUM", to_node: "J_MW", progress_percent: 0, ...COORDS["MUM"] },
-      scheduled_departure: new Date(),
-      actual_departure: new Date(),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#7C3AED", schedule,
+      train_id:"115", name:"Deccan Exp", type:"LOCAL",
+      length_meters:150, max_speed_kmh:110, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"MUM", to_node:"J_MW", progress_percent:0, ...COORDS["MUM"] },
+      scheduled_departure:new Date(), actual_departure:new Date(),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#7C3AED", schedule,
     };
   })(),
 
-  // 116 — Sahyadri Express  MUM→CHN via coastal+GOA+BLR  PASSENGER
-  // Route: MUM → J_SW → GOA → BLR → CHN
+  // T-116  Sahyadri Express  MUM→CHN  PASSENGER
   (() => {
-    const route = ["MUM","J_SW","GOA","BLR","CHN"];
-    const schedule = buildSchedule(
-      route, "07:30",
+    const route    = ["MUM","J_SW","GOA","BLR","CHN"];
+    const schedule = buildSchedule(route, "07:30",
       [204, 160, 282, 162],
-      [5,    5,   5,   10],
-      [4,    1,   3,    4],
-    );
+      [5, 5, 5, 10],
+      [4, 1, 3, 4]);
     return {
-      train_id: "116", name: "Sahyadri Express", type: "PASSENGER",
-      length_meters: 200, max_speed_kmh: 100, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "MUM", to_node: "J_SW", progress_percent: 0, ...COORDS["MUM"] },
-      scheduled_departure: new Date(Date.now() + 90 * 60000),
-      actual_departure: new Date(Date.now() + 90 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#0EA5E9", schedule,
+      train_id:"116", name:"Sahyadri Express", type:"PASSENGER",
+      length_meters:200, max_speed_kmh:100, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"MUM", to_node:"J_SW", progress_percent:0, ...COORDS["MUM"] },
+      scheduled_departure:new Date(Date.now()+90*60000), actual_departure:new Date(Date.now()+90*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#0EA5E9", schedule,
     };
   })(),
 
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
   // LONG-HAUL CROSS-COUNTRY
-  // ══════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════
 
-  // 117 — Dibrugadh Rajdhani  DEL→CHN  SUPERFAST  (pre-seeded with 8 min delay)
-  // Route: DEL → J_NW → AGR → J_NC → J_NE → PAT → KOL → J_CE → CHN
+  // T-117  Dibrugadh Rajdhani  DEL→CHN  SUPERFAST  ← PRE-SEEDED DELAY = 8m
+  // Tests delay display + rerouting agent. Also passes through FOG zone (JNC-JNE).
   (() => {
-    const route = ["DEL","J_NW","AGR","J_NC","J_NE","PAT","KOL","J_CE","CHN"];
-    const schedule = buildSchedule(
-      route, "05:30",
+    const route    = ["DEL","J_NW","AGR","J_NC","J_NE","PAT","KOL","J_CE","CHN"];
+    const schedule = buildSchedule(route, "05:30",
       [100, 55, 85, 120, 65, 180, 260, 88],
-      [5,   3,   3,   3,  5,   3,  10],
-      [1,   2, null, null, 2,   1,   3],
-    );
+      [5, 3, 3, 3, 5, 3, 10],
+      [1, 2, null, null, 2, 1, 3]);
     return {
-      train_id: "117", name: "Dibrugadh Rajdhani", type: "SUPERFAST",
-      length_meters: 310, max_speed_kmh: 155, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "DEL", to_node: "J_NW", progress_percent: 0, ...COORDS["DEL"] },
-      scheduled_departure: new Date(),
-      actual_departure: new Date(),
-      delay_minutes: 8,  // pre-seeded delay to test delay display + rerouting agent
-      assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#D946EF", schedule,
+      train_id:"117", name:"Dibrugadh Rajdhani", type:"SUPERFAST",
+      length_meters:310, max_speed_kmh:155, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"DEL", to_node:"J_NW", progress_percent:0, ...COORDS["DEL"] },
+      scheduled_departure:new Date(), actual_departure:new Date(),
+      delay_minutes:8, // ← pre-seeded delay for testing
+      assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#D946EF", schedule,
     };
   })(),
 
-  // 118 — Vivek Express  CHN→DEL  SUPERFAST  (longest route, overnight)
-  // Route: CHN → BLR → GOA → J_SW → MUM → SUR → J_CW → DEL
+  // T-118  Vivek Express  CHN→DEL  SUPERFAST  (longest route, overnight)
+  // Passes through STORM zone (JCE-CHN) at start
   (() => {
-    const route = ["CHN","BLR","GOA","J_SW","MUM","SUR","J_CW","DEL"];
-    const schedule = buildSchedule(
-      route, "20:00",
+    const route    = ["CHN","BLR","GOA","J_SW","MUM","SUR","J_CW","DEL"];
+    const schedule = buildSchedule(route, "20:00",
       [162, 282, 160, 204, 101, 77, 180],
-      [5,   5,   5,   5,   3,  10],
-      [5,   2,   1,   4,  null, 5],
-    );
+      [5, 5, 5, 5, 3, 10],
+      [5, 2, 1, 4, null, 5]);
     return {
-      train_id: "118", name: "Vivek Express", type: "SUPERFAST",
-      length_meters: 320, max_speed_kmh: 145, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "CHN", to_node: "BLR", progress_percent: 0, ...COORDS["CHN"] },
-      scheduled_departure: new Date(Date.now() + 180 * 60000),
-      actual_departure: new Date(Date.now() + 180 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#BE185D", schedule,
+      train_id:"118", name:"Vivek Express", type:"SUPERFAST",
+      length_meters:320, max_speed_kmh:145, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"CHN", to_node:"BLR", progress_percent:0, ...COORDS["CHN"] },
+      scheduled_departure:new Date(Date.now()+180*60000), actual_departure:new Date(Date.now()+180*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#BE185D", schedule,
     };
   })(),
 
-  // 119 — Golden Temple Mail  KOL→BLR via Patna+Nagpur+Hyderabad  EXPRESS
-  // Route: KOL → PAT → J_NE → J_NC → J_CN → HYD → J_SC → BLR
+  // T-119  Golden Temple Mail  KOL→BLR  EXPRESS
   (() => {
-    const route = ["KOL","PAT","J_NE","J_NC","J_CN","HYD","J_SC","BLR"];
-    const schedule = buildSchedule(
-      route, "06:15",
+    const route    = ["KOL","PAT","J_NE","J_NC","J_CN","HYD","J_SC","BLR"];
+    const schedule = buildSchedule(route, "06:15",
       [180, 65, 120, 175, 166, 110, 125],
-      [5,   3,   3,   5,   5,  10],
-      [2, null, null,  1,   2,   2],
-    );
+      [5, 3, 3, 5, 5, 10],
+      [2, null, null, 1, 2, 2]);
     return {
-      train_id: "119", name: "Golden Temple Mail", type: "EXPRESS",
-      length_meters: 240, max_speed_kmh: 120, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "KOL", to_node: "PAT", progress_percent: 0, ...COORDS["KOL"] },
-      scheduled_departure: new Date(Date.now() + 15 * 60000),
-      actual_departure: new Date(Date.now() + 15 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#FBBF24", schedule,
+      train_id:"119", name:"Golden Temple Mail", type:"EXPRESS",
+      length_meters:240, max_speed_kmh:120, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"KOL", to_node:"PAT", progress_percent:0, ...COORDS["KOL"] },
+      scheduled_departure:new Date(Date.now()+15*60000), actual_departure:new Date(Date.now()+15*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#FBBF24", schedule,
     };
   })(),
 
-  // 120 — Tamil Nadu Express  DEL→CHN via West+Mumbai+Hyderabad  SUPERFAST
-  // Route: DEL → J_CW → SUR → MUM → J_MW → J_MC → HYD → CHN
+  // T-120  Tamil Nadu Express  DEL→CHN  SUPERFAST
   (() => {
-    const route = ["DEL","J_CW","SUR","MUM","J_MW","J_MC","HYD","J_CE","CHN"];
-    const schedule = buildSchedule(
-      route, "06:30",
+    const route    = ["DEL","J_CW","SUR","MUM","J_MW","J_MC","HYD","J_CE","CHN"];
+    const schedule = buildSchedule(route, "06:30",
       [180, 77, 101, 87, 100, 115, 124, 88],
-      [5,   4,   5,   5,   5,  10],
-      [6,   1,   2,   3,   4,   5],
-    );
+      [5, 4, 5, 5, 5, 10],
+      [6, 1, 2, 3, 4, 5]);
     return {
-      train_id: "120", name: "Tamil Nadu Express", type: "SUPERFAST",
-      length_meters: 270, max_speed_kmh: 140, current_speed_kmh: 0,
-      status: "RUNNING", route, current_segment_index: 0,
-      position: { from_node: "DEL", to_node: "J_CW", progress_percent: 0, ...COORDS["DEL"] },
-      scheduled_departure: new Date(Date.now() + 30 * 60000),
-      actual_departure: new Date(Date.now() + 30 * 60000),
-      delay_minutes: 0, assigned_platform: null, current_station: null,
-      reroute_count: 0, last_agent_decision: null, color: "#34D399", schedule,
+      train_id:"120", name:"Tamil Nadu Express", type:"SUPERFAST",
+      length_meters:270, max_speed_kmh:140, current_speed_kmh:0,
+      status:"RUNNING", route, current_segment_index:0,
+      position:{ from_node:"DEL", to_node:"J_CW", progress_percent:0, ...COORDS["DEL"] },
+      scheduled_departure:new Date(Date.now()+30*60000), actual_departure:new Date(Date.now()+30*60000),
+      delay_minutes:0, assigned_platform:null, current_station:null,
+      reroute_count:0, last_agent_decision:null, color:"#34D399", schedule,
     };
   })(),
 ];
 
 // ─── PLATFORM CONFIGS ────────────────────────────────────────────────────────
-//
-// Platform lengths must accommodate the longest trains at each station.
-// DEL and MUM handle SUPERFAST trains up to 320m.
-// Smaller stations like GOA cap at 300m (no 320m trains stop there).
-
 const platformConfigs: Record<string, { platforms: number; lengths: number[] }> = {
-  DEL: { platforms: 6, lengths: [500, 480, 450, 420, 380, 320] },  // major terminus
+  DEL: { platforms: 6, lengths: [500, 480, 450, 420, 380, 320] },
   MUM: { platforms: 5, lengths: [450, 420, 400, 360, 320] },
   CHN: { platforms: 5, lengths: [440, 400, 370, 330, 280] },
   KOL: { platforms: 4, lengths: [420, 390, 350, 300] },
@@ -635,26 +539,22 @@ const platformConfigs: Record<string, { platforms: number; lengths: number[] }> 
   SUR: { platforms: 3, lengths: [380, 330, 260] },
 };
 
-// ─── SEED FUNCTION ───────────────────────────────────────────────────────────
-
+// ─── SEED ────────────────────────────────────────────────────────────────────
 async function seedMongo(): Promise<void> {
   const uri = process.env.MONGODB_URI || "mongodb://localhost:27017/railway_control";
   await mongoose.connect(uri);
   logger.info("MongoDB connected for seeding");
 
   try {
-    // Clear existing data
     await TrainModel.deleteMany({});
     await PlatformLogModel.deleteMany({});
     await TrainEventModel.deleteMany({});
     logger.info("Cleared existing MongoDB data");
 
-    // Insert trains (cast to any so Mongoose accepts the `schedule` field
-    // even if the current schema definition doesn't list it explicitly)
     await TrainModel.insertMany(trains as any[]);
     logger.info(`Inserted ${trains.length} trains`);
 
-    // Log schedule summary for verification
+    // Log schedule summary
     for (const t of trains) {
       const sched = (t as any).schedule as any[];
       if (sched?.length) {
@@ -662,13 +562,14 @@ async function seedMongo(): Promise<void> {
         const last  = sched[sched.length - 1];
         logger.info(
           `  ${t.train_id} (${t.name}): ${sched.length} stops | ` +
-          `${first.station_id} ${first.scheduled_departure} → ` +
-          `${last.station_id} arr ${last.scheduled_arrival}`
+          `${first.station_id} dep ${first.scheduled_departure} → ` +
+          `${last.station_id} arr ${last.scheduled_arrival}` +
+          ((t as any).delay_minutes ? ` | ⚠ pre-delay: ${(t as any).delay_minutes}m` : "")
         );
       }
     }
 
-    // Insert platform slots — all FREE, ready for agent assignment
+    // Platform slots
     const platformLogs: any[] = [];
     for (const [stationId, config] of Object.entries(platformConfigs)) {
       for (let i = 0; i < config.platforms; i++) {
@@ -685,24 +586,69 @@ async function seedMongo(): Promise<void> {
       }
     }
     await PlatformLogModel.insertMany(platformLogs);
-    logger.info(
-      `Inserted ${platformLogs.length} platform slots across ` +
-      `${Object.keys(platformConfigs).length} stations`
-    );
+    logger.info(`Inserted ${platformLogs.length} platform slots across ${Object.keys(platformConfigs).length} stations`);
 
-    // Seed a few initial TrainEvents so the log panel isn't empty on first load
-    const seedEvents = trains.slice(0, 5).map(t => ({
-      event_id:   `SEED-${t.train_id}-${Date.now()}`,
-      train_id:   t.train_id,
-      event_type: "DEPARTURE",
-      details:    { station_id: (t as any).route[0], note: "Initial seed departure" },
-      source:     "SYSTEM",
-      timestamp:  new Date(),
-    }));
+    // Seed initial TrainEvents — so history panel is non-empty on first load
+    const now = Date.now();
+    const seedEvents = [
+      // Normal departures
+      ...trains.slice(0, 5).map((t, i) => ({
+        event_id:   `SEED-DEP-${t.train_id}-${now}`,
+        train_id:   t.train_id,
+        event_type: "DEPARTURE",
+        details:    { station_id: (t as any).route[0], note: "Initial departure (seeded)" },
+        source:     "SYSTEM",
+        timestamp:  new Date(now - (5 - i) * 60000),
+      })),
+      // Weather events mapped to valid enum values
+      // RAIN on MUM-JSW — T-113 Konkan Railway
+      {
+        event_id:   `SEED-WX-RAIN-${now}`,
+        train_id:   "113",
+        event_type: "SPEED_CHANGE",           // ✅ was: "WEATHER_ALERT"
+        details:    { segment_id: "MUM-JSW-A", weather: "RAIN", risk_level: "MEDIUM", description: "Monsoon rain — reduced visibility, speed 85%" },
+        source:     "ENGINE",                 // ✅ was: "WEATHER_ENGINE"
+        timestamp:  new Date(now - 2 * 60000),
+      },
+      // FOG on JNC-JNE — T-117 Dibrugadh Rajdhani
+      {
+        event_id:   `SEED-WX-FOG-${now}`,
+        train_id:   "117",
+        event_type: "SPEED_CHANGE",           // ✅ was: "WEATHER_ALERT"
+        details:    { segment_id: "JNC-JNE-A", weather: "FOG", risk_level: "HIGH", description: "Dense winter fog — caution speed 65%" },
+        source:     "ENGINE",                 // ✅ was: "WEATHER_ENGINE"
+        timestamp:  new Date(now - 1 * 60000),
+      },
+      // STORM on JCE-CHN — T-111 Coromandel Express
+      {
+        event_id:   `SEED-WX-STORM-${now}`,
+        train_id:   "111",
+        event_type: "SPEED_CHANGE",           // ✅ was: "WEATHER_ALERT"
+        details:    { segment_id: "JCE-CHN-A", weather: "STORM", risk_level: "CRITICAL", description: "Cyclone warning — emergency speed 50%" },
+        source:     "ENGINE",                 // ✅ was: "WEATHER_ENGINE"
+        timestamp:  new Date(now),
+      },
+      // Pre-existing delay event for T-117
+      {
+        event_id:   `SEED-DELAY-117-${now}`,
+        train_id:   "117",
+        event_type: "DELAY_UPDATED",          // ✅ was: "DELAY"
+        details:    { delay_minutes: 8, reason: "Congestion at origin terminal", station_id: "DEL" },
+        source:     "SYSTEM",                 // ✅ was: "SCHEDULE_MANAGER"
+        timestamp:  new Date(now - 3 * 60000),
+      },
+    ];
+
     await TrainEventModel.insertMany(seedEvents);
-    logger.info(`Inserted ${seedEvents.length} seed events`);
+    logger.info(`Inserted ${seedEvents.length} seed events (departures + weather alerts + delay)`);
 
     logger.info("✅ MongoDB seed complete!");
+    logger.info(`\nWeather pre-seeded on network (matching seedNeo4j):\n` +
+      `  🌧 RAIN:  MUM-JSW-A/B (Konkan coastal — T-113, T-116 affected)\n` +
+      `  🌫 FOG:   JNC-JNE-A/B (North corridor — T-101, T-117 affected)\n` +
+      `  ⛈ STORM: JCE-CHN-A/B (East-South link — T-111, T-112, T-109 affected)`
+    );
+
   } catch (err) {
     logger.error({ err }, "MongoDB seed failed");
     throw err;
