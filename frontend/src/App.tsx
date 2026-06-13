@@ -6,6 +6,72 @@ import NetworkMap from "./sections/NetworkMap";
 import BottomMetricsStrip from "./sections/BottomMetricsStrip";
 import TrainSchedulePanel from "./sections/TrainSchedulePanel";
 
+
+type WakeupStage =
+  | "idle"          // haven't started polling yet
+  | "connecting"    // waiting for /health to respond
+  | "starting"      // /health OK, calling /simulation/start
+  | "ready";        // engine running, overlay dismissed
+
+function ServerWakeupOverlay({ stage }: { stage: WakeupStage }) {
+  if (stage === "ready") return null;
+
+  const messages: Record<WakeupStage, { title: string; sub: string }> = {
+    idle:       { title: "Initialising…",         sub: "Preparing railway control system" },
+    connecting: { title: "Waking up server…",     sub: "Connecting to backend & databases" },
+    starting:   { title: "Starting simulation…",  sub: "Loading trains, tracks & schedules" },
+    ready:      { title: "",                       sub: "" },
+  };
+
+  const { title, sub } = messages[stage];
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      backgroundColor: "rgba(7, 10, 20, 0.97)",
+      display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      fontFamily: "Inter, sans-serif",
+      backdropFilter: "blur(4px)",
+    }}>
+      {/* Animated train icon */}
+      <div style={{ fontSize: 56, marginBottom: 24, animation: "wakeup-pulse 1.4s ease-in-out infinite" }}>
+        🚄
+      </div>
+
+      {/* Spinner ring */}
+      <div style={{
+        width: 56, height: 56, borderRadius: "50%",
+        border: "3px solid #1E2A45",
+        borderTop: "3px solid #3B82F6",
+        animation: "wakeup-spin 0.9s linear infinite",
+        marginBottom: 28,
+      }} />
+
+      <h2 style={{ color: "#E5E7EB", fontSize: 22, fontWeight: 700, margin: 0 }}>{title}</h2>
+      <p  style={{ color: "#6B7280", fontSize: 14, marginTop: 8 }}>{sub}</p>
+
+      {/* Pulsing dots */}
+      <div style={{ display: "flex", gap: 8, marginTop: 28 }}>
+        {[0, 1, 2].map(i => (
+          <div key={i} style={{
+            width: 8, height: 8, borderRadius: "50%",
+            backgroundColor: "#3B82F6",
+            animation: `wakeup-dot 1.2s ${i * 0.2}s ease-in-out infinite`,
+          }} />
+        ))}
+      </div>
+
+      {/* Keyframe injection */}
+      <style>{`
+        @keyframes wakeup-spin  { to { transform: rotate(360deg); } }
+        @keyframes wakeup-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+        @keyframes wakeup-dot   { 0%,80%,100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.2); } }
+      `}</style>
+    </div>
+  );
+}
+
 // ─── NETWORK CONSTANTS (unchanged from previous update) ──────────────────────
 const STATIONS: Record<string, { name: string; lat: number; lng: number; platforms: number }> = {
   DEL:  { name: "New Delhi",        lat: 120, lng: 130, platforms: 6 },
@@ -168,6 +234,40 @@ export interface AlertEvent {
 }
 
 export default function App() {
+  // ── SERVER WAKEUP STATE ──────────────────────────────────────────────────
+  const [wakeupStage, setWakeupStage] = useState<WakeupStage>("connecting");
+  const wakeupDone = useRef(false);
+
+  // Poll /health until server responds, then POST /simulation/start once.
+  // Engine starts only here — never auto-starts on the backend side.
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval>;
+
+    const tryWakeup = async () => {
+      if (wakeupDone.current) return;
+      try {
+        const res = await fetch("/health");
+        if (!res.ok) return;
+        setWakeupStage("starting");
+
+        // Kick the engine — idempotent: simulator.start() is a no-op if already running
+        await fetch("/api/v1/simulation/start", { method: "POST" });
+
+        wakeupDone.current = true;
+        clearInterval(timer);
+
+        // Small grace period so the engine emits its first system:status event
+        setTimeout(() => setWakeupStage("ready"), 800);
+      } catch {
+        // Server not up yet — keep polling silently
+      }
+    };
+
+    tryWakeup();
+    timer = setInterval(tryWakeup, 2000);
+    return () => clearInterval(timer);
+  }, []);
+
   const [socket, setSocket]         = useState<Socket | null>(null);
   const [connected, setConnected]   = useState(false);
   const [trains, setTrains]         = useState<Record<string, TrainState>>({});
@@ -194,7 +294,7 @@ export default function App() {
 
   // ── SOCKET CONNECTION ────────────────────────────────────────────────────
   useEffect(() => {
-    const s = io("http://localhost:3000");
+    const s = io();
     setSocket(s);
     s.on("connect",    () => setConnected(true));
     s.on("disconnect", () => setConnected(false));
@@ -368,7 +468,7 @@ export default function App() {
   // ── DASHBOARD POLLING (every 5 s) ────────────────────────────────────────
   useEffect(() => {
     const fetchDashboard = () => {
-      fetch("http://localhost:3000/api/v1/dashboard")
+      fetch("/api/v1/dashboard")
         .then(r => r.json())
         .then(data => {
           if (data.trains) {
@@ -448,7 +548,7 @@ export default function App() {
   const handleSpeedChange = useCallback((speed: number) => {
     const clamped = Math.max(0.1, Math.min(50, speed));
     setSimSpeed(clamped);
-    fetch("http://localhost:3000/api/v1/simulation/speed", {
+    fetch("/api/v1/simulation/speed", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ speed: clamped }),
@@ -457,7 +557,7 @@ export default function App() {
 
   const handleStartTimeChange = useCallback((time: string) => {
     setSimStartTime(time);
-    fetch("http://localhost:3000/api/v1/simulation/timeframe", {
+    fetch("/api/v1/simulation/timeframe", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ start_time: time }),
@@ -469,6 +569,9 @@ export default function App() {
   const freePlatforms  = Object.values(platforms).flat().filter(p => p.status === "FREE").length;
 
   return (
+    <>
+    {/* Wakeup overlay — sits above everything, auto-dismisses when engine is ready */}
+    <ServerWakeupOverlay stage={wakeupStage} />
     <div className="h-screen w-screen flex flex-col" style={{ backgroundColor: "#0B0F19" }}>
       <Header connected={connected} simTime={simTime} simSpeed={simSpeed} />
       <div className="flex flex-1 overflow-hidden">
@@ -574,5 +677,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </>
   );
 }
